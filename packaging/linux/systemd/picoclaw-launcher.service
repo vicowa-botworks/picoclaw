@@ -1,0 +1,58 @@
+[Unit]
+Description=PicoClaw launcher (web configuration console)
+Documentation=https://docs.picoclaw.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=picoclaw
+Group=picoclaw
+
+# Must match picoclaw.service: the launcher finds a running gateway by reading
+# $PICOCLAW_HOME/.picoclaw.pid, so a different home makes it think nothing is
+# running and try to spawn its own.
+Environment=PICOCLAW_HOME=/var/lib/picoclaw
+Environment=TZ=UTC
+EnvironmentFile=-/etc/picoclaw/env
+
+# -console     headless mode, no GUI/systray (there is no X on a Pi)
+# -no-browser  do not try to open a browser
+# -port 18800  the launcher's own port; the gateway itself is 18790
+#
+# Deliberately NOT passing -public: the console then listens on localhost only,
+# which is what you want on a machine sitting on a LAN. Reach it through a
+# tunnel instead of exposing it:
+#     ssh -L 18800:localhost:18800 <user>@<host>
+# Add -public (or a drop-in with -host) only if you have set the dashboard
+# password via the /launcher-setup flow and accept the exposure.
+ExecStart=/usr/bin/picoclaw-launcher -console -no-browser -port 18800
+
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# --- hardening -------------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/picoclaw
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

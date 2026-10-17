@@ -191,6 +191,21 @@ nfpms:
         dst: /usr/share/applications/picoclaw-launcher.desktop
       - src: web/picoclaw-launcher.png
         dst: /usr/share/icons/hicolor/512x512/apps/picoclaw-launcher.png
+      # systemd units. goreleaser's nfpm schema (pkg/config.NFPMOverridables)
+      # exposes only `contents` and `scripts` -- there is no `systemd:` or
+      # `presets:` key like nfpm itself has, so the units ship as ordinary
+      # contents and enabling is done by the maintainer scripts below.
+      - src: packaging/linux/systemd/picoclaw.service
+        dst: /lib/systemd/system/picoclaw.service
+      - src: packaging/linux/systemd/picoclaw-launcher.service
+        dst: /lib/systemd/system/picoclaw-launcher.service
+      - src: packaging/linux/env.example
+        dst: /etc/picoclaw/env.example
+    scripts:
+      preinstall: packaging/linux/scripts/preinstall.sh
+      postinstall: packaging/linux/scripts/postinstall.sh
+      preremove: packaging/linux/scripts/preremove.sh
+      postremove: packaging/linux/scripts/postremove.sh
 
 changelog:
   sort: asc
