@@ -169,7 +169,7 @@ Lawati **[picoclaw.io](https://picoclaw.io)** — laman web rasmi mengesan platf
 
 ### Muat turun binari pra-kompil
 
-Muat turun binari untuk platform anda dari halaman [GitHub Releases](https://github.com/sipeed/picoclaw/releases).
+Muat turun binari untuk platform anda dari halaman [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases).
 
 ### Bina dari sumber (untuk pembangunan)
 
@@ -179,7 +179,7 @@ Prasyarat:
 - Node.js 22+ dan pnpm 10.33.0+ untuk binaan Web UI / launcher
 
 ```bash
-git clone https://github.com/sipeed/picoclaw.git
+git clone https://github.com/vicowa-botworks/picoclaw.git
 cd picoclaw
 make deps
 
@@ -240,7 +240,7 @@ Untuk dokumentasi WebUI terperinci, lihat [docs.picoclaw.io](https://docs.picocl
 
 ```bash
 # 1. Klon repo ini
-git clone https://github.com/sipeed/picoclaw.git
+git clone https://github.com/vicowa-botworks/picoclaw.git
 cd picoclaw
 
 # 2. Jalankan pertama kali — jana docker/data/config.json secara automatik kemudian keluar
@@ -323,7 +323,7 @@ Muat turun APK dari [picoclaw.io](https://picoclaw.io/download/) dan pasang seca
 
 ```bash
 # Muat turun keluaran terkini
-wget https://github.com/sipeed/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
+wget https://github.com/vicowa-botworks/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
 tar xzf picoclaw_Linux_arm64.tar.gz
 pkg install proot
 termux-chroot ./picoclaw onboard   # chroot menyediakan susun atur sistem fail Linux standard

@@ -168,7 +168,7 @@ Kunjungi **[picoclaw.io](https://picoclaw.io)** — website resmi mendeteksi pla
 
 ### Unduh binary yang sudah dikompilasi
 
-Atau, unduh binary untuk platform Anda dari halaman [GitHub Releases](https://github.com/sipeed/picoclaw/releases).
+Atau, unduh binary untuk platform Anda dari halaman [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases).
 
 ### Build dari source (untuk pengembangan)
 
@@ -178,7 +178,7 @@ Prasyarat:
 - Node.js 22+ dan pnpm 10.33.0+ untuk build Web UI / launcher
 
 ```bash
-git clone https://github.com/sipeed/picoclaw.git
+git clone https://github.com/vicowa-botworks/picoclaw.git
 
 cd picoclaw
 make deps
@@ -242,7 +242,7 @@ Untuk dokumentasi WebUI lengkap, lihat [docs.picoclaw.io](https://docs.picoclaw.
 
 ```bash
 # 1. Clone repo ini
-git clone https://github.com/sipeed/picoclaw.git
+git clone https://github.com/vicowa-botworks/picoclaw.git
 cd picoclaw
 
 # 2. Jalankan pertama kali — otomatis membuat docker/data/config.json lalu keluar
@@ -326,7 +326,7 @@ Unduh APK dari [picoclaw.io](https://picoclaw.io/download/) dan instal langsung.
 
 ```bash
 # Unduh rilis terbaru
-wget https://github.com/sipeed/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
+wget https://github.com/vicowa-botworks/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
 tar xzf picoclaw_Linux_arm64.tar.gz
 pkg install proot
 termux-chroot ./picoclaw onboard   # chroot menyediakan tata letak filesystem Linux standar
