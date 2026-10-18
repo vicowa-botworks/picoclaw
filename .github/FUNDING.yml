@@ -1,3 +1,8 @@
 # These are supported funding model platforms
+#
+# Deliberately empty on this fork. The upstream entry (`github: [sipeed]`) made
+# the Sponsor button here route contributions to the original project's program;
+# `vicowa-botworks` has no sponsors program, so listing it would only advertise
+# a link that goes nowhere. Add it once one exists.
 
-github: [sipeed]
+github: []

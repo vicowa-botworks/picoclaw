@@ -1,3 +1,7 @@
+# Each service builds locally from docker/Dockerfile* and tags the result with
+# the image name below, so `docker compose up` needs no registry access. Set
+# DOCKERHUB_REPOSITORY (the same name the release workflow reads from the
+# repository variables) to pull or push published images instead.
 services:
   # ─────────────────────────────────────────────
   # PicoClaw Agent (one-shot query)
@@ -7,7 +11,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: docker.io/sipeed/picoclaw:latest
+    image: ${DOCKERHUB_REPOSITORY:-rodneydraaisma/picoclaw}:latest
     container_name: picoclaw-agent
     profiles:
       - agent
@@ -28,7 +32,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: docker.io/sipeed/picoclaw:latest
+    image: ${DOCKERHUB_REPOSITORY:-rodneydraaisma/picoclaw}:latest
     container_name: picoclaw-gateway
     restart: unless-stopped
     profiles:
@@ -47,7 +51,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.launcher
-    image: docker.io/sipeed/picoclaw:launcher
+    image: ${DOCKERHUB_REPOSITORY:-rodneydraaisma/picoclaw}:launcher
     container_name: picoclaw-launcher
     restart: unless-stopped
     profiles:
