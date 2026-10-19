@@ -3,6 +3,10 @@
 .git
 .gitignore
 build/
+# Host Go build/module cache (Makefile sets GOCACHE and GOMODCACHE under .cache/).
+# The image runs its own `go mod download`, so nothing in a build reads this;
+# shipping it adds ~4.5 GB to every build context.
+.cache/
 .picoclaw/
 config/
 .env
