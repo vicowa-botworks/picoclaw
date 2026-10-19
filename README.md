@@ -178,7 +178,7 @@ Visit **[picoclaw.io](https://picoclaw.io)** — the official website auto-detec
 
 ### Download precompiled binary
 
-Alternatively, download the binary for your platform from the [GitHub Releases](https://github.com/sipeed/picoclaw/releases) page.
+Alternatively, download the binary for your platform from the [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases) page.
 
 ### Build from source (for development)
 
@@ -188,7 +188,7 @@ Prerequisites:
 - Node.js 22+ and pnpm 10.33.0+ for Web UI / launcher builds
 
 ```bash
-git clone https://github.com/sipeed/picoclaw.git
+git clone https://github.com/vicowa-botworks/picoclaw.git
 
 cd picoclaw
 make deps
@@ -254,7 +254,7 @@ For detailed WebUI documentation, see [docs.picoclaw.io](https://docs.picoclaw.i
 
 ```bash
 # 1. Clone this repo
-git clone https://github.com/sipeed/picoclaw.git
+git clone https://github.com/vicowa-botworks/picoclaw.git
 cd picoclaw
 
 # 2. First run — auto-generates docker/data/config.json then exits
@@ -341,7 +341,7 @@ For a full command-line setup checklist, see the [Android Termux Guide](docs/gui
 
 ```bash
 # Download the latest release
-wget https://github.com/sipeed/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
+wget https://github.com/vicowa-botworks/picoclaw/releases/latest/download/picoclaw_Linux_arm64.tar.gz
 tar xzf picoclaw_Linux_arm64.tar.gz
 pkg install proot
 termux-chroot ./picoclaw onboard   # chroot provides a standard Linux filesystem layout
