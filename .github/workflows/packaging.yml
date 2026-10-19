@@ -1,0 +1,72 @@
+name: Packaging
+
+# The packaging tree is shell script and unit files, so nothing in `pr.yml`
+# touches it: there is no Go or TypeScript to compile. These are the two checks
+# that would have caught the RPM upgrade bug (a %preun that stopped and disabled
+# the gateway on every `rpm -Uvh`) — a contract test on the scriptlet arguments,
+# and a parse check on the units.
+#
+# The deeper end-to-end run against a booted systemd lives in
+# packaging/linux/tests/container-suite.sh and is run manually before a release:
+# it needs a privileged container, which is not something to put on every PR.
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - '.goreleaser.yaml'
+      - '.github/workflows/packaging.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - '.goreleaser.yaml'
+      - '.github/workflows/packaging.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  scriptlets:
+    name: Scriptlet contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run scriptlet contract tests
+        run: sh packaging/linux/tests/scriptlets.sh
+
+  units:
+    name: Unit files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify the systemd units
+        run: |
+          set -euo pipefail
+          # The units name a user and two binaries that only exist once the
+          # package is installed. Give systemd-analyze something to resolve so a
+          # missing binary is not mistaken for a unit-file error.
+          sudo groupadd --system picoclaw || true
+          sudo useradd --system --gid picoclaw picoclaw || true
+          for b in picoclaw picoclaw-launcher; do
+            printf '#!/bin/sh\n' | sudo tee "/usr/bin/$b" > /dev/null
+            sudo chmod 0755 "/usr/bin/$b"
+          done
+
+          status=0
+          for u in packaging/linux/systemd/*.service; do
+            echo "::group::$u"
+            out=$(systemd-analyze verify "$u" 2>&1) || true
+            printf '%s\n' "$out"
+            # Only problems naming one of our units count. A runner's own units
+            # can emit unrelated warnings that would fail this job for reasons
+            # that have nothing to do with this repository.
+            if printf '%s\n' "$out" | grep -qiE 'picoclaw.*([Uu]nknown|[Ff]ailed|[Ee]rror|Cannot|not executable)'; then
+              echo "::error::$u failed verification"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
