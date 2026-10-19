@@ -58,7 +58,7 @@ For documentation contributions, prefer the layout and naming conventions in [`d
 
 ### Prerequisites
 
-- Go 1.25 or later
+- Go 1.26.9 or later
 - `make`
 
 ### Build
