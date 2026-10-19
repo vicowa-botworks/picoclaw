@@ -12,7 +12,11 @@
 set -eu
 
 systemctl daemon-reload >/dev/null 2>&1 || true
-systemctl reset-failed >/dev/null 2>&1 || true
+# Named units only. A bare `systemctl reset-failed` resets the start-limit
+# counter of EVERY unit on the host, which is other services' state to manage.
+# The names may already be unloaded by now — the package manager removes the
+# unit files before this runs — so the failure is expected and ignored.
+systemctl reset-failed picoclaw.service picoclaw-launcher.service >/dev/null 2>&1 || true
 
 echo "picoclaw removed. Your config, workspace and API keys were kept in"
 echo "/var/lib/picoclaw and /etc/picoclaw."

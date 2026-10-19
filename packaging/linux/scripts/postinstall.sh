@@ -12,10 +12,15 @@ set -eu
 enable_unit() {
     unit=$1
 
-    # `systemctl mask` makes /etc/systemd/system/<unit> a symlink to /dev/null,
-    # which is also how you spot it without asking systemd (systemd may not be
-    # running at package-install time, e.g. in a chroot or a container build).
-    if [ -L "/etc/systemd/system/$unit" ] && [ ! -e "/etc/systemd/system/$unit" ]; then
+    # `systemctl mask` symlinks /etc/systemd/system/<unit> to /dev/null, and
+    # /dev/null exists — so `[ ! -e "$path" ]` is the wrong probe. It fires for a
+    # dangling symlink and misses every real mask, which would let a masked unit
+    # through to `systemctl enable` (fails) and then to the deb-systemd-helper
+    # fallback below, which never asks systemd and would write "enabled"
+    # bookkeeping over an operator's explicit "never start this".
+    # Read the link instead. systemd may not be running at package-install time
+    # (chroot, container build), so this stays a filesystem test.
+    if [ "$(readlink "/etc/systemd/system/$unit" 2>/dev/null)" = /dev/null ]; then
         echo "picoclaw: $unit is masked, not enabling it."
         return 0
     fi
@@ -63,6 +68,19 @@ enable_unit() {
 }
 
 enable_unit picoclaw.service
+
+# Seed the secrets file from the template.
+#
+# The package ships /etc/picoclaw/env.example and nothing else, so without this
+# the operator follows the message below straight into `sudoedit /etc/picoclaw/env`
+# and CREATES the file that will hold provider API keys with whatever owner and
+# mode their editor and umask happen to hand out — not the 0640 root:picoclaw the
+# design calls for. install.sh already does this for the tar.gz path; the two
+# install paths must not diverge, and README documents this one.
+if [ -f /etc/picoclaw/env.example ] && [ ! -f /etc/picoclaw/env ] &&
+    getent group picoclaw >/dev/null 2>&1; then
+    install -m 0640 -o root -g picoclaw /etc/picoclaw/env.example /etc/picoclaw/env
+fi
 
 echo
 echo "picoclaw installed and enabled at boot."

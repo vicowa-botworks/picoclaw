@@ -13,6 +13,16 @@ Wants=network-online.target
 # somewhere else:  systemctl edit picoclaw.service
 ConditionPathExists=/var/lib/picoclaw/config.json
 
+# Restart forever is not the same as restart silently. Without a limit, a
+# gateway that fails for a reason the condition above does not cover — port
+# already bound, provider init error, unreadable env file — retries every 5s
+# indefinitely: `systemctl status` never goes red and the journal churns on a
+# headless board. Five failures inside five minutes now parks the unit in
+# `failed`, which is something you can actually notice. To try again:
+#   systemctl reset-failed picoclaw.service && systemctl start picoclaw.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=picoclaw

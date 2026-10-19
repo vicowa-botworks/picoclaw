@@ -91,6 +91,17 @@ else
 fi
 
 echo "==> installing systemd units"
+# This script installs to /etc/systemd/system; the .deb and .rpm put the same
+# units in /lib/systemd/system. /etc wins, permanently, and package upgrades
+# only ever rewrite the /lib copy — so doing this on a host that has the package
+# leaves a unit that silently never updates. Say so rather than leaving it as a
+# confusing ticket six months out.
+if [ -e /lib/systemd/system/picoclaw.service ]; then
+    echo "    WARNING: /lib/systemd/system/picoclaw.service exists, so this host"
+    echo "             has the .deb/.rpm. The /etc copy installed below shadows it"
+    echo "             and will NOT be updated by package upgrades. To undo:"
+    echo "               sudo rm /etc/systemd/system/picoclaw.service"
+fi
 install -d -m 0755 /etc/systemd/system
 install -m 0644 "$SCRIPT_DIR/systemd/picoclaw.service" /etc/systemd/system/picoclaw.service
 if [ -f "$SCRIPT_DIR/systemd/picoclaw-launcher.service" ] && [ -x /usr/bin/picoclaw-launcher ]; then

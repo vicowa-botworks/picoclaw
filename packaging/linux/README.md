@@ -119,6 +119,14 @@ Also on: `PrivateDevices`, `PrivateTmp`, `ProtectHome`,
 `NoNewPrivileges`, `SystemCallArchitectures=native`, and an empty
 `CapabilityBoundingSet`.
 
+One consequence worth knowing before it surprises you: `NoNewPrivileges` plus
+`RestrictSUIDSGID` mean **setuid helpers do not work** inside the service —
+`sudo`, `ping`, `mount`, and anything else that escalates through a setuid bit
+fails, however the `picoclaw` account is configured. That is intended, and it is
+the first thing you hit if you ask the agent's `exec` tool to do something that
+needs privilege. Run the privileged step outside the service, or relax both
+directives in a drop-in if you really mean it.
+
 `RestrictAddressFamilies` keeps `AF_NETLINK` for a reason: `pkg/netbind` calls
 `net.InterfaceAddrs()`, which Go implements over netlink. Drop it and gateway
 binding breaks.
@@ -176,3 +184,28 @@ at boot, and only on a system where systemd is actually running, so it passes
 CI-style chroot tests and fails on the real device. `systemctl enable` creates
 the symlink whether or not systemd is PID 1, so it is correct in a chroot and on
 a booted system alike.
+
+## Tests
+
+```sh
+sh packaging/linux/tests/scriptlets.sh        # seconds, no privileges needed
+packaging/linux/tests/container-suite.sh      # minutes, needs docker + nfpm
+```
+
+`scriptlets.sh` is what CI runs (`.github/workflows/packaging.yml`). It drives
+the scriptlets against a stub `systemctl` and asserts what they would have done
+for every argument they can be handed — including the one that used to be
+missed: RPM passes `%preun` a **number** (`1` = upgrade, `0` = erase) where dpkg
+passes a word.
+
+`container-suite.sh` is the real thing. It builds three RPM versions from the
+scripts in this tree, boots systemd in a privileged container, and walks
+install → operator edits → `rpm -Uvh` → masked `rpm -Uvh` → erase, asserting
+that the gateway is still `enabled` and `active` afterwards, that the secrets
+file keeps its `0640 root:picoclaw` mode and its contents, that an operator's
+`chmod` on `/var/lib/picoclaw` survives the upgrade, and that a masked unit
+stays masked. Run it before a release.
+
+It has to run natively on x86_64. Under qemu-aarch64 every unit here dies with
+`status=226/NAMESPACE` — namespace directives are not emulated — and sandbox
+behaviour is arch-independent anyway, so x86_64 is the honest host.

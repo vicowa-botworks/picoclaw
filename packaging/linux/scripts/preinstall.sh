@@ -33,6 +33,13 @@ getent passwd picoclaw >/dev/null 2>&1 ||
         picoclaw
 
 # 0750: the daemon owns its state, nothing else on the box reads it.
-install -d -o picoclaw -g picoclaw -m 0750 "$PICOCLAW_HOME_DIR"
+#
+# Only when the directory is missing. `install -d -o … -m …` re-asserts owner
+# and mode every time it runs, so on an upgrade it would silently revert an
+# operator's own chmod/chown on these two directories — the header promises this
+# script never touches existing data.
+[ -d "$PICOCLAW_HOME_DIR" ] ||
+    install -d -o picoclaw -g picoclaw -m 0750 "$PICOCLAW_HOME_DIR"
 # Secrets land here (env file). Root writes, the group reads.
-install -d -o root -g picoclaw -m 0750 "$CONF_DIR"
+[ -d "$CONF_DIR" ] ||
+    install -d -o root -g picoclaw -m 0750 "$CONF_DIR"

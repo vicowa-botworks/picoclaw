@@ -4,6 +4,11 @@ Documentation=https://docs.picoclaw.io/
 After=network-online.target
 Wants=network-online.target
 
+# Same guard as picoclaw.service: without a limit, Restart=on-failure retries
+# every 5s forever and the unit never reports `failed`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=picoclaw
