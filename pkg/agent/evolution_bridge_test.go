@@ -821,6 +821,11 @@ func TestEvolutionBridge_TurnEndUsesPayloadWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newEvolutionBridge: %v", err)
 	}
+	// Close drains the goroutine OnEvent starts. Without it, FinalizeTurn is
+	// still writing state/evolution/profiles/ when the test returns and
+	// t.TempDir() runs RemoveAll over the same tree, which fails the cleanup
+	// with "directory not empty".
+	defer bridge.Close()
 
 	err = bridge.OnEvent(context.Background(), Event{
 		Kind: EventKindTurnEnd,
@@ -859,6 +864,11 @@ func TestEvolutionBridge_TurnEndUsesExplicitAttemptTrail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newEvolutionBridge: %v", err)
 	}
+	// Close drains the goroutine OnEvent starts. Without it, FinalizeTurn is
+	// still writing state/evolution/profiles/ when the test returns and
+	// t.TempDir() runs RemoveAll over the same tree, which fails the cleanup
+	// with "directory not empty".
+	defer bridge.Close()
 
 	err = bridge.OnEvent(context.Background(), Event{
 		Kind: EventKindTurnEnd,
