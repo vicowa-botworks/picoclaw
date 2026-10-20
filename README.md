@@ -20,11 +20,14 @@
 
 [中文](docs/project/README.zh.md) | [日本語](docs/project/README.ja.md) | [한국어](docs/project/README.ko.md) | [Português](docs/project/README.pt-br.md) | [Tiếng Việt](docs/project/README.vi.md) | [Français](docs/project/README.fr.md) | [Italiano](docs/project/README.it.md) | [Bahasa Indonesia](docs/project/README.id.md) | [Malay](docs/project/README.ms.md) | **English**
 
+**This repository is a downstream fork of [`sipeed/picoclaw`](https://github.com/sipeed/picoclaw).**
+Upstream source, issues and roadmap live at [sipeed/picoclaw](https://github.com/sipeed/picoclaw) — this fork ([`vicowa-botworks/picoclaw`](https://github.com/vicowa-botworks/picoclaw)) is where this fork's own binaries, `.deb`/`.rpm` packages and Docker images are published.
+
 </div>
 
 ---
 
-> **PicoClaw** is an independent open-source project initiated by [Sipeed](https://sipeed.com), written entirely in **Go** from scratch — not a fork of OpenClaw, NanoBot, or any other project.
+> **PicoClaw** is an independent open-source project initiated by [Sipeed](https://sipeed.com), written entirely in **Go** from scratch — upstream's codebase is not derived from OpenClaw, NanoBot, or any other project.
 
 **PicoClaw** is an ultra-lightweight personal AI assistant inspired by [NanoBot](https://github.com/HKUDS/nanobot). It was rebuilt from the ground up in **Go** through a "self-bootstrapping" process — the AI Agent itself drove the architecture migration and code optimization.
 
@@ -53,49 +56,6 @@
 > * **BEWARE:** Many `.ai/.org/.com/.net/...` domains have been registered by third parties. Do not trust them.
 > * **NOTE:** PicoClaw is in early rapid development. There may be unresolved security issues. Do not deploy to production before v1.0.
 > * **NOTE:** PicoClaw has recently merged many PRs. Recent builds may use 10-20MB RAM. Resource optimization is planned after feature stabilization.
-
-## 📢 News
-
-2026-05-11 🛒 **LicheeRV-Claw on AliExpress!** You can now purchase LicheeRV-Claw from [AliExpress](https://www.aliexpress.com/item/1005006519668532.html), making it easier to try PicoClaw on compact RISC-V hardware.
-
-<p align="center">
-  <a href="https://www.aliexpress.com/item/1005006519668532.html">
-    <img src="assets/licheerv-claw.jpg" alt="LicheeRV-Claw on AliExpress" width="520">
-  </a>
-</p>
-
-2026-05-28 🚀 **v0.2.9 Released!** MCP server management in Web UI, configurable Sogou-backed web search, tool feedback animation in channels, `pretty_print` and `disable_escape_html` defaults, and numerous bug fixes across providers and channels.
-
-2026-05-14 🚀 **v0.2.8 Released!** MCP CLI commands (`show`, `add`, `list`, `remove`, `test`, `edit`), empty object instead of null for MCP tool parameters, and build fixes.
-
-2026-05-07 🚀 **v0.2.7 Released!** Configurable Sogou-backed web search, channel tool feedback animation, linter fixes.
-
-2026-04-23 🚀 **v0.2.6 Released!** Hooks with respond action and comprehensive documentation, isolation support, help banner fix.
-
-2026-04-11 🚀 **v0.2.5 Released!** Zoneinfo from TZ/ZONEINFO env, Matrix CommonMark rendering alignment, `read_file` by lines.
-
-2026-03-31 📱 **Android Support!** PicoClaw now runs on Android! Download the APK at [picoclaw.io](https://picoclaw.io/download)
-
-2026-03-25 🚀 **v0.2.4 Released!** Agent architecture overhaul (SubTurn, Hooks, Steering, EventBus), WeChat/WeCom integration, security hardening (.security.yml, sensitive data filtering), new providers (AWS Bedrock, Azure, Xiaomi MiMo), and 35 bug fixes. PicoClaw has reached **26K Stars**!
-
-2026-03-17 🚀 **v0.2.3 Released!** System tray UI (Windows & Linux), sub-agent status query (`spawn_status`), experimental Gateway hot-reload, Cron security gating, and 2 security fixes. PicoClaw has reached **25K Stars**!
-
-2026-03-09 🎉 **v0.2.1 — Biggest update yet!** MCP protocol support, 4 new channels (Matrix/IRC/WeCom/Discord Proxy), 3 new providers (Kimi/Minimax/Avian), vision pipeline, JSONL memory store, model routing.
-
-2026-02-28 📦 **v0.2.0** released with Docker Compose and Web UI Launcher support.
-
-<details>
-<summary>Earlier news...</summary>
-
-2026-02-26 🎉 PicoClaw hits **20K Stars** in just 17 days! Channel auto-orchestration and capability interfaces are live.
-
-2026-02-16 🎉 PicoClaw breaks 12K Stars in one week! Community maintainer roles and [Roadmap](ROADMAP.md) officially launched.
-
-2026-02-13 🎉 PicoClaw breaks 5000 Stars in 4 days! Project roadmap and developer groups in progress.
-
-2026-02-09 🎉 **PicoClaw Released!** Built in 1 day to bring AI Agents to $10 hardware with <10MB RAM. Let's Go, PicoClaw!
-
-</details>
 
 ## ✨ Features
 
@@ -162,23 +122,11 @@ _*Recent builds may use 10-20MB due to rapid PR merges. Resource optimization is
 
 PicoClaw can be deployed on virtually any Linux device!
 
-- $9.9 [LicheeRV-Nano](https://www.aliexpress.com/item/1005006519668532.html) E(Ethernet) or W(WiFi6) edition, for a minimal home assistant
-- $30~50 [NanoKVM](https://www.aliexpress.com/item/1005007369816019.html), or $100 [NanoKVM-Pro](https://www.aliexpress.com/item/1005010048471263.html), for automated server operations
-- $50 [MaixCAM](https://www.aliexpress.com/item/1005008053333693.html) or $100 [MaixCAM2](https://www.kickstarter.com/projects/zepan/maixcam2-build-your-next-gen-4k-ai-camera), for smart surveillance
-
-<https://private-user-images.githubusercontent.com/83055338/547056448-e7b031ff-d6f5-4468-bcca-5726b6fecb5c.mp4>
-
-🌟 More Deployment Cases Await!
-
 ## 📦 Install
 
-### Download from picoclaw.io (Recommended)
+### Download precompiled binary (Recommended)
 
-Visit **[picoclaw.io](https://picoclaw.io)** — the official website auto-detects your platform and provides one-click download. No need to manually pick an architecture.
-
-### Download precompiled binary
-
-Alternatively, download the binary for your platform from the [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases) page.
+Download the binary for your platform from the [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases) page. Each release also carries `.deb` and `.rpm` packages (with systemd units) and multi-arch images on [`ghcr.io/vicowa-botworks/picoclaw`](https://ghcr.io/vicowa-botworks/picoclaw) and [`rodneydraaisma/picoclaw`](https://hub.docker.com/r/rodneydraaisma/picoclaw).
 
 ### Build from source (for development)
 
@@ -224,7 +172,7 @@ The WebUI Launcher provides a browser-based interface for configuration and chat
 
 **Option 1: Double-click (Desktop)**
 
-After downloading from [picoclaw.io](https://picoclaw.io), double-click `picoclaw-launcher` (or `picoclaw-launcher.exe` on Windows). Your browser will open automatically at `http://localhost:18800`.
+After downloading from the [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases) page, double-click `picoclaw-launcher` (or `picoclaw-launcher.exe` on Windows). Your browser will open automatically at `http://localhost:18800`.
 
 **Option 2: Command line**
 
@@ -656,18 +604,3 @@ For detailed guides beyond this README:
 | [Troubleshooting](docs/operations/troubleshooting.md) | Common issues and solutions |
 | [Tools Configuration](docs/reference/tools_configuration.md) | Per-tool enable/disable, exec policies, MCP, Skills |
 | [Hardware Compatibility](docs/guides/hardware-compatibility.md) | Tested boards, minimum requirements |
-
-## 🤝 Contribute & Roadmap
-
-PRs welcome! The codebase is intentionally small and readable.
-
-See our [Community Roadmap](https://github.com/sipeed/picoclaw/issues/988) and [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-Developer group building, join after your first merged PR!
-
-User Groups:
-
-Discord: <https://discord.gg/V4sAZ9XWpN>
-
-WeChat:
-<img src="assets/wechat.png" alt="WeChat group QR code" width="512">
