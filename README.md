@@ -124,7 +124,43 @@ PicoClaw can be deployed on virtually any Linux device!
 
 ## 📦 Install
 
-### Download precompiled binary (Recommended)
+### One-line install (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vicowa-botworks/picoclaw/main/scripts/install.sh | sh
+```
+
+The script detects your OS and CPU architecture, downloads the matching release asset, verifies its SHA-256 against the release checksums, and installs it. On Linux it installs the `.deb`/`.rpm` package when `dpkg`/`rpm` is available — the only route that also installs the systemd units, creates the `picoclaw` user and seeds `/etc/picoclaw/env` — and otherwise falls back to the tarball. It ends by running `picoclaw version`, so you can see what landed.
+
+Needs only `sh` and `curl` (or `wget`). It uses `sudo` only when the target actually requires it, so installing into a directory you own never prompts.
+
+| Option | Effect |
+| --- | --- |
+| `-v`, `--version <ver>` | Install a specific release instead of the latest |
+| `-m`, `--method <how>` | `auto` (default), `package`, or `tarball` |
+| `-d`, `--install-dir <dir>` | Where tarball installs go (default `/usr/local/bin`, else `~/.local/bin`) |
+| `-f`, `--force` | Reinstall the version that is already installed |
+| `-n`, `--dry-run` | Print the resolved plan; change nothing |
+| `--no-checksum` | Skip SHA-256 verification (discouraged) |
+| `--no-sudo` | Never elevate; fail instead of calling `sudo` |
+| `-h`, `--help` | Full list, including the `PICOCLAW_*` environment variables |
+
+Pass options after `--` when piping into `sh`:
+
+```bash
+# Preview what would be installed, on this machine, before installing it
+curl -fsSL https://raw.githubusercontent.com/vicowa-botworks/picoclaw/main/scripts/install.sh | sh -s -- --dry-run
+
+# Pin a release
+curl -fsSL https://raw.githubusercontent.com/vicowa-botworks/picoclaw/main/scripts/install.sh | sh -s -- --version v0.3.2-vicowa.1
+```
+
+Verified on Debian 13 (`.deb`, booted systemd), Fedora 42 (`.rpm`) and Alpine (musl, busybox `wget`, tarball fallback) by `scripts/tests/installer-suite.sh`; macOS, FreeBSD and NetBSD are supported through the tarball path. Windows has no `sh` — download `picoclaw_Windows_x86_64.zip` from the [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases) page instead.
+
+> [!NOTE]
+> The checksum confirms the download is the file the release published; it is not proof of authenticity, because no release asset is signed.
+
+### Download precompiled binary
 
 Download the binary for your platform from the [GitHub Releases](https://github.com/vicowa-botworks/picoclaw/releases) page. Each release also carries `.deb` and `.rpm` packages (with systemd units) and multi-arch images on [`ghcr.io/vicowa-botworks/picoclaw`](https://ghcr.io/vicowa-botworks/picoclaw) and [`rodneydraaisma/picoclaw`](https://hub.docker.com/r/rodneydraaisma/picoclaw).
 
