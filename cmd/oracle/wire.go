@@ -24,7 +24,7 @@ import (
 // both `nil` and `[]` for an `omitempty` slice, so a fixture expressed as wire
 // JSON could not tell a port which of the two a case was testing.
 
-// wireCase is one (described value, marshalled output) pair.
+// wireCase is one (described value, marshaled output) pair.
 func wireCase[T any](name, kind string, value T, describe func(T) any) fixtureCase {
 	return fixtureCase{
 		Name:  name,
@@ -253,7 +253,10 @@ func wireCases() []fixtureCase {
 	out = append(out, wireCase("chunk_zero", "stream_chunk", protocoltypes.StreamChunk{}, describeStreamChunk))
 	out = append(out, wireCase("block_zero", "content_block", protocoltypes.ContentBlock{}, describeContentBlock))
 	out = append(out, wireCase("attach_zero", "attachment", protocoltypes.Attachment{}, describeAttachment))
-	out = append(out, wireCase("detail_zero", "reasoning_detail", protocoltypes.ReasoningDetail{}, describeReasoningDetail))
+	out = append(
+		out,
+		wireCase("detail_zero", "reasoning_detail", protocoltypes.ReasoningDetail{}, describeReasoningDetail),
+	)
 
 	// -- nil versus empty, for every slice and map.
 	msg("message_media_nil", protocoltypes.Message{Role: "user", Content: "x"})
@@ -342,7 +345,10 @@ func wireCases() []fixtureCase {
 	}
 	msg("message_time_whole_second_utc", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), 0)})
 	msg("message_time_milli", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+1e6, 0)})
-	msg("message_time_nano_trailing_zeros", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+100e6, 0)})
+	msg(
+		"message_time_nano_trailing_zeros",
+		protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+100e6, 0)},
+	)
 	msg("message_time_nano_full", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+123456789, 0)})
 	msg("message_time_offset_positive", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), 19800)})
 	msg("message_time_offset_negative", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), -25200)})
@@ -365,9 +371,14 @@ func wireCases() []fixtureCase {
 	// session files diffed by hand (and by tests that compare strings) depend
 	// on it. One case with everything set pins the whole sequence.
 	msg("message_all_fields", protocoltypes.Message{
-		Role: "assistant", Content: "hello", ModelName: "claude", CreatedAt: at(1700000000*int64(time.Second), 0),
-		Media:            []string{"m1", "m2"},
-		Attachments:      []protocoltypes.Attachment{{Type: "image", Ref: "r", URL: "u", Filename: "f", ContentType: "image/png"}},
+		Role:      "assistant",
+		Content:   "hello",
+		ModelName: "claude",
+		CreatedAt: at(1700000000*int64(time.Second), 0),
+		Media:     []string{"m1", "m2"},
+		Attachments: []protocoltypes.Attachment{
+			{Type: "image", Ref: "r", URL: "u", Filename: "f", ContentType: "image/png"},
+		},
 		ReasoningContent: "because",
 		SystemParts:      []protocoltypes.ContentBlock{{Type: "text", Text: "p"}},
 		ToolCalls: []protocoltypes.ToolCall{{
@@ -440,7 +451,10 @@ func wireFuzz(seed int64, n int) []fixtureCase {
 			Content:          randText(rng, 0, 12),
 			ReasoningContent: maybe(rng, func() string { return randText(rng, 0, 12) }),
 			ToolCallID:       maybe(rng, func() string { return fmt.Sprintf("tc_%d", rng.Intn(1000)) }),
-			ModelName:        maybe(rng, func() string { return randChoice(rng, []string{"claude", "gpt", randText(rng, 0, 12)}) }),
+			ModelName: maybe(
+				rng,
+				func() string { return randChoice(rng, []string{"claude", "gpt", randText(rng, 0, 12)}) },
+			),
 		}
 		switch rng.Intn(3) {
 		case 1:
@@ -449,7 +463,7 @@ func wireFuzz(seed int64, n int) []fixtureCase {
 			m.Media = []string{randText(rng, 0, 12), randText(rng, 0, 12)}
 		}
 		if rng.Intn(4) == 0 {
-			t := time.Unix(0, int64(rng.Int63n(4e18))-2e18).In(time.FixedZone("f", (rng.Intn(29)-14)*1800))
+			t := time.Unix(0, rng.Int63n(4e18)-2e18).In(time.FixedZone("f", (rng.Intn(29)-14)*1800))
 			m.CreatedAt = &t
 		}
 		if rng.Intn(3) == 0 {

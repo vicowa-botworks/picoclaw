@@ -4,15 +4,15 @@
 // The Go implementation is the oracle: this program contains no expectations, it
 // only records what the current code does. A fixture is an (input, output) pair
 // produced by calling the real function, so the Rust side is checked against
-// measured behaviour rather than against a re-reading of this source. Regenerate
-// after any intentional behaviour change and review the diff.
+// measured behavior rather than against a re-reading of this source. Regenerate
+// after any intentional behavior change and review the diff.
 //
 // Usage:
 //
 //	go run -tags goolm,stdjson ./cmd/oracle -out /path/to/rusty-crab/conformance/fixtures
 //
 // Output is deterministic for a given -seed, so committed fixtures diff cleanly
-// and a behaviour change shows up as a value change rather than a reshuffle.
+// and a behavior change shows up as a value change rather than a reshuffle.
 package main
 
 import (
@@ -40,34 +40,45 @@ func main() {
 	flag.Parse()
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
-		fail("create %s: %v", *out, err)
+		failf("create %s: %v", *out, err)
 	}
 
 	provenance := readProvenance(*seed)
 
-	emit(provenance, filepath.Join(*out, "tokenizer_estimate_message_tokens.json"),
+	emit(
+		provenance,
+		filepath.Join(*out, "tokenizer_estimate_message_tokens.json"),
 		"tokenizer/EstimateMessageTokens",
 		"Content and ReasoningContent are counted in runes; ToolCall and ToolCallID fields are counted in bytes; the scale is a floor division; media is added after scaling.",
 		messageCases(*seed, *fuzzCases),
-		func(c fixtureCase) any { return tokenizer.EstimateMessageTokens(c.message) })
+		func(c fixtureCase) any { return tokenizer.EstimateMessageTokens(c.message) },
+	)
 
-	emit(provenance, filepath.Join(*out, "tokenizer_estimate_tool_defs_tokens.json"),
+	emit(
+		provenance,
+		filepath.Join(*out, "tokenizer_estimate_tool_defs_tokens.json"),
 		"tokenizer/EstimateToolDefsTokens",
 		"Name and Description are counted in bytes; Parameters contributes len(json.Marshal(x)), i.e. Go's exact encoding including sorted map keys and HTML escaping; a Parameters value that cannot marshal is skipped entirely.",
 		toolDefCases(*seed, *fuzzCases),
-		func(c fixtureCase) any { return tokenizer.EstimateToolDefsTokens(c.defs) })
+		func(c fixtureCase) any { return tokenizer.EstimateToolDefsTokens(c.defs) },
+	)
 
-	emit(provenance, filepath.Join(*out, "protocoltypes_marshal.json"),
+	emit(
+		provenance,
+		filepath.Join(*out, "protocoltypes_marshal.json"),
 		"pkg/providers/protocoltypes + encoding/json.Marshal",
 		"expected is the exact output of json.Marshal over the described Go value. Field order is declaration order. Absent, null, [] and \"\" are four different encodings and each comes from a different Go value: an omitempty field is dropped for its zero value, a bare field is always emitted, a nil slice or map emits null and an empty one emits [] or {}. time.Time is RFC3339Nano, which trims trailing zeros from the fraction (an exact second has none). StreamChunk has no json tags, so its keys are the Go field names with their original capitalisation. Fields tagged json:\"-\" (Name, Arguments, ThoughtSignature on ToolCall; PromptLayer, PromptSlot, PromptSource everywhere) never appear.",
 		wireCases(),
-		func(c fixtureCase) any { return marshalWire(c.wire) })
+		func(c fixtureCase) any { return marshalWire(c.wire) },
+	)
 
 	// The tool-defs seam above only exposes json.Marshal through a token count,
 	// so a one-byte encoding difference shows up as an off-by-one estimate and
 	// says nothing about which byte moved. This fixture pins the encoding itself:
 	// expected is the exact output string, or null where json.Marshal errors.
-	emit(provenance, filepath.Join(*out, "go_json_encode_parameters.json"),
+	emit(
+		provenance,
+		filepath.Join(*out, "go_json_encode_parameters.json"),
 		"encoding/json.Marshal",
 		"expected is the exact output of json.Marshal, or null when it returns an error. Map keys are sorted by byte; <, > and & are escaped as \\u003c \\u003e \\u0026; U+2028 and U+2029 are escaped; \\b and \\f have short forms and the rest of C0 is \\u00XX with lower-case hex; non-ASCII is not escaped. Floats are shortest round-trip, positional in [1e-6, 1e21) and exponent form outside it, with a positive exponent padded to two digits (1e+21) and a negative exponent stripped to one (1e-7, but 5e-324).",
 		paramValueCases(*seed, *fuzzCases),
@@ -77,7 +88,8 @@ func main() {
 				return nil
 			}
 			return string(b)
-		})
+		},
+	)
 
 	// The session store's contract is a directory, not a return value. This
 	// fixture runs a script of public store calls in a temporary directory and
@@ -174,15 +186,15 @@ func emit(p provenance, file, seam, note string, cases []fixtureCase, score func
 
 	raw, err := json.MarshalIndent(fx, "", "  ")
 	if err != nil {
-		fail("marshal %s: %v", file, err)
+		failf("marshal %s: %v", file, err)
 	}
 	if err := os.WriteFile(file, append(raw, '\n'), 0o644); err != nil {
-		fail("write %s: %v", file, err)
+		failf("write %s: %v", file, err)
 	}
 	fmt.Printf("%-46s %5d cases\n", filepath.Base(file), fx.CaseCount)
 }
 
-func fail(format string, args ...any) {
+func failf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "oracle: "+format+"\n", args...)
 	os.Exit(1)
 }

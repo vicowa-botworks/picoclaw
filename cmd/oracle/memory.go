@@ -224,13 +224,13 @@ func memoryCaseErr(name, wantErrOp string, steps ...storeStep) fixtureCase {
 func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 	dir, err := os.MkdirTemp("", "picoclaw-oracle-memory-")
 	if err != nil {
-		fail("memory: temp dir: %v", err)
+		failf("memory: temp dir: %v", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	store, err := memory.NewJSONLStore(dir)
 	if err != nil {
-		fail("memory: new store: %v", err)
+		failf("memory: new store: %v", err)
 	}
 	defer store.Close()
 
@@ -278,23 +278,23 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		case "list_all":
 			result = describeStrings(store.ListSessions())
 		default:
-			fail("memory: unknown step %q", s.op)
+			failf("memory: unknown step %q", s.op)
 		}
 		if err != nil {
 			if s.op == wantErrOp {
 				return map[string]any{"error": s.op}
 			}
-			fail("memory: step %s on %q: %v", s.op, s.key, err)
+			failf("memory: step %s on %q: %v", s.op, s.key, err)
 		}
 	}
 
 	if wantErrOp != "" {
-		fail("memory: case %q expected %q to fail, and it did not", name, wantErrOp)
+		failf("memory: case %q expected %q to fail, and it did not", name, wantErrOp)
 	}
 
 	files, err := readStoreDir(dir)
 	if err != nil {
-		fail("memory: read back: %v", err)
+		failf("memory: read back: %v", err)
 	}
 	return map[string]any{"files": files, "result": maskTimes(result)}
 }
