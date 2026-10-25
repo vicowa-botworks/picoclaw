@@ -91,6 +91,15 @@ func SplitMessage(content string, maxLen int) []string {
 						chunk := strings.TrimRight(string(runes[start:msgEnd]), " \t\n\r") + "\n```"
 						messages = append(messages, chunk)
 						remaining := strings.TrimSpace(header + "\n" + string(runes[msgEnd:totalLen]))
+						if len(remaining) >= totalLen-start {
+							// Reopening the fence left more work than we had
+							// before, so carry on past this chunk instead.
+							start = msgEnd
+							for start < totalLen && isASCIISpace(runes[start]) {
+								start++
+							}
+							continue
+						}
 						// Replace the tail of runes with the reconstructed remaining
 						runes = []rune(remaining)
 						totalLen = len(runes)
@@ -107,17 +116,33 @@ func SplitMessage(content string, maxLen int) []string {
 						msgEnd = newEnd
 					} else {
 						// If we can't split before, we MUST split inside (last resort)
-						if unclosedIdx-start > 20 {
+						splitAt := min(start+maxLen-5, totalLen)
+						// The reopened header is prepended in front of the
+						// unconsumed tail, so the next pass reads it back as a
+						// block of its own. Unless the chunk reaches past that
+						// header the tail never shrinks and the buffer grows
+						// forever, so only take this branch when the reopen
+						// leaves strictly less work than we started with.
+						canReopen := splitAt > start
+						var remaining string
+						if canReopen {
+							remaining = strings.TrimSpace(header + "\n" + string(runes[splitAt:totalLen]))
+							canReopen = len(remaining) < totalLen-start
+						}
+						switch {
+						case unclosedIdx-start > 20:
 							msgEnd = unclosedIdx
-						} else {
-							splitAt := min(start+maxLen-5, totalLen)
+						case canReopen:
 							chunk := strings.TrimRight(string(runes[start:splitAt]), " \t\n\r") + "\n```"
 							messages = append(messages, chunk)
-							remaining := strings.TrimSpace(header + "\n" + string(runes[splitAt:totalLen]))
 							runes = []rune(remaining)
 							totalLen = len(runes)
 							start = 0
 							continue
+						default:
+							// Fence integrity needs more room than maxLen
+							// gives it here. Fall through to the plain split
+							// below rather than looping.
 						}
 					}
 				}
@@ -131,12 +156,18 @@ func SplitMessage(content string, maxLen int) []string {
 		messages = append(messages, string(runes[start:msgEnd]))
 		// Advance start, skipping leading whitespace of next chunk
 		start = msgEnd
-		for start < totalLen && (runes[start] == ' ' || runes[start] == '\t' || runes[start] == '\n' || runes[start] == '\r') {
+		for start < totalLen && isASCIISpace(runes[start]) {
 			start++
 		}
 	}
 
 	return messages
+}
+
+// isASCIISpace reports whether r is one of the four ASCII whitespace runes the
+// splitter treats as skippable at a chunk boundary.
+func isASCIISpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 // findLastUnclosedCodeBlockInRange finds the last opening ``` that doesn't have a closing ```

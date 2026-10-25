@@ -360,3 +360,121 @@ func TestSplitMessage_CodeBlockIntegrity(t *testing.T) {
 		t.Errorf("First chunk exceeded maxLen: length %d runes", len([]rune(chunks[0])))
 	}
 }
+
+// TestSplitMessageTinyMaxLenTerminates guards an infinite loop. When a chunk
+// would end inside a code block the splitter closes the block with an injected
+// "\n```" and re-opens it by prepending the original header to the unconsumed
+// tail. The next pass reads that header back as a block of its own, so unless
+// the chunk reaches past the header the tail never shrinks: the buffer grows by
+// len(header)+1 runes per pass and the original text is never reached. With a
+// 3-rune header that happens for maxLen up to 8, so SplitMessage("```abc", 5)
+// and SplitMessage("```"+strings.Repeat("a",500), 9) never returned.
+//
+// Fence integrity cannot be preserved in a chunk that small, so both reopen
+// sites now check that the reopen actually shrinks the work left and fall back
+// to a plain split when it does not.
+//
+// The assertion is that this test finishes at all: a regression shows up as the
+// package test hitting the Go test timeout, not as a failed expectation.
+func TestSplitMessageTinyMaxLenTerminates(t *testing.T) {
+	inputs := []string{
+		"```abc",
+		"a\n```abc",
+		"```" + strings.Repeat("a", 500),
+		strings.Repeat("```f\nx\n```\n", 60),
+		strings.Repeat("a\n", 400) + "```",
+		"```go\n" + strings.Repeat("fmt.Println(\"hi\")\n", 100) + "```",
+		"intro text\n\n" + strings.Repeat("```rs\nfn main() {}\n```\nprose ", 20),
+	}
+
+	for _, in := range inputs {
+		for maxLen := 1; maxLen <= 20; maxLen++ {
+			chunks := SplitMessage(in, maxLen)
+
+			if len(chunks) == 0 {
+				t.Errorf("maxLen %d: no chunks returned for %q", maxLen, shortInput(in))
+				continue
+			}
+			for i, c := range chunks {
+				if c == "" {
+					t.Errorf("maxLen %d: chunk %d is empty for %q", maxLen, i, shortInput(in))
+				}
+				if n := len([]rune(c)); n > maxLen+maxLen/2+16 {
+					t.Errorf("maxLen %d: chunk %d is %d runes, far over the limit: %q",
+						maxLen, i, n, shortInput(c))
+				}
+			}
+			if !keepsNonSpaceRunes(in, strings.Join(chunks, "")) {
+				t.Errorf("maxLen %d: content lost across the split of %q", maxLen, shortInput(in))
+			}
+		}
+	}
+}
+
+// TestSplitMessageLongFenceHeaderTerminates covers the same non-termination
+// through the other reopen site. Its entry condition bounds maxLen but not the
+// length of the fence header, and progress needs the chunk to clear the header,
+// so a long header moves the failure window up rather than removing it: a
+// 40-rune header hung for maxLen 24..70.
+func TestSplitMessageLongFenceHeaderTerminates(t *testing.T) {
+	longHeader := "```" + strings.Repeat("L", 40)
+	inputs := []string{
+		longHeader + strings.Repeat("q", 2000),
+		longHeader + "\n" + strings.Repeat("q ", 1000),
+		"```" + strings.Repeat("L", 60) + "\n" + strings.Repeat("w ", 1000),
+		"```" + strings.Repeat("L", 20) + strings.Repeat("z", 1500),
+		longHeader + "\n" + strings.Repeat("word ", 750),
+	}
+
+	for _, in := range inputs {
+		for maxLen := 24; maxLen <= 90; maxLen++ {
+			chunks := SplitMessage(in, maxLen)
+
+			if len(chunks) == 0 {
+				t.Errorf("maxLen %d: no chunks returned for %q", maxLen, shortInput(in))
+				continue
+			}
+			for i, c := range chunks {
+				if c == "" {
+					t.Errorf("maxLen %d: chunk %d is empty for %q", maxLen, i, shortInput(in))
+				}
+			}
+			if !keepsNonSpaceRunes(in, strings.Join(chunks, "")) {
+				t.Errorf("maxLen %d: content lost across the split of %q", maxLen, shortInput(in))
+			}
+		}
+	}
+}
+
+func shortInput(s string) string {
+	r := []rune(s)
+	if len(r) > 40 {
+		return string(r[:40]) + "…"
+	}
+	return s
+}
+
+// keepsNonSpaceRunes reports whether every non-whitespace rune of want appears
+// in got in order, allowing for the fence characters the splitter injects.
+func keepsNonSpaceRunes(want, got string) bool {
+	it := []rune(got)
+	pos := 0
+	for _, r := range want {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		found := false
+		for pos < len(it) {
+			c := it[pos]
+			pos++
+			if c == r {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
