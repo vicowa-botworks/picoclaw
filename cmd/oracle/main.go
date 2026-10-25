@@ -57,6 +57,12 @@ func main() {
 		toolDefCases(*seed, *fuzzCases),
 		func(c fixtureCase) any { return tokenizer.EstimateToolDefsTokens(c.defs) })
 
+	emit(provenance, filepath.Join(*out, "protocoltypes_marshal.json"),
+		"pkg/providers/protocoltypes + encoding/json.Marshal",
+		"expected is the exact output of json.Marshal over the described Go value. Field order is declaration order. Absent, null, [] and \"\" are four different encodings and each comes from a different Go value: an omitempty field is dropped for its zero value, a bare field is always emitted, a nil slice or map emits null and an empty one emits [] or {}. time.Time is RFC3339Nano, which trims trailing zeros from the fraction (an exact second has none). StreamChunk has no json tags, so its keys are the Go field names with their original capitalisation. Fields tagged json:\"-\" (Name, Arguments, ThoughtSignature on ToolCall; PromptLayer, PromptSlot, PromptSource everywhere) never appear.",
+		wireCases(),
+		func(c fixtureCase) any { return marshalWire(c.wire) })
+
 	// The tool-defs seam above only exposes json.Marshal through a token count,
 	// so a one-byte encoding difference shows up as an off-by-one estimate and
 	// says nothing about which byte moved. This fixture pins the encoding itself:
@@ -85,6 +91,7 @@ type fixtureCase struct {
 	message protocoltypes.Message
 	defs    []protocoltypes.ToolDefinition
 	params  any
+	wire    any
 }
 
 type fixture struct {
