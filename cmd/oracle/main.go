@@ -78,6 +78,18 @@ func main() {
 			}
 			return string(b)
 		})
+
+	// The session store's contract is a directory, not a return value. This
+	// fixture runs a script of public store calls in a temporary directory and
+	// records the file names and file bytes it left behind, so the port is
+	// checked against the artifact users actually keep rather than against the
+	// Go structs that produced it. Wall-clock timestamps are masked to "<time>";
+	// everything else is byte-exact.
+	emit(provenance, filepath.Join(*out, "memory_jsonl_store.json"),
+		"pkg/memory.JSONLStore",
+		memoryStoreNote,
+		memoryCases(),
+		func(c fixtureCase) any { return runStoreScript(c.Name, c.script, c.expectErrOp) })
 }
 
 // fixtureCase is one row. Exactly one of message / defs is populated, chosen by
@@ -88,10 +100,12 @@ type fixtureCase struct {
 	Input    map[string]any `json:"input"`
 	Expected any            `json:"expected"`
 
-	message protocoltypes.Message
-	defs    []protocoltypes.ToolDefinition
-	params  any
-	wire    any
+	message     protocoltypes.Message
+	defs        []protocoltypes.ToolDefinition
+	params      any
+	wire        any
+	script      []storeStep
+	expectErrOp string
 }
 
 type fixture struct {
