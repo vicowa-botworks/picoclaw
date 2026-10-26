@@ -231,7 +231,15 @@ func describePointer[T any](p *T, describe func(T) any) any {
 
 // ----------------------------------------------------------------------- cases --
 
-func wireCases() []fixtureCase {
+// wireCases threads the generator's -seed and -fuzz the way every other seam
+// does: the seed is XORed with a per-seam constant so the four corpora do not
+// fuzz in lockstep, and the fuzz count is scaled from -fuzz rather than ignored.
+// The scale is 200/1500 -- the wire seam's share of the default -fuzz 1500 -- so
+// the default run is byte-identical to the committed fixture while -seed and
+// -fuzz actually change this file. It must be threaded: the envelope records
+// `seed` for the whole run, and a file generated from a hardcoded seed while
+// claiming the flag's value is a provenance field that lies.
+func wireCases(seed int64, fuzz int) []fixtureCase {
 	var out []fixtureCase
 
 	msg := func(name string, m protocoltypes.Message) {
@@ -268,8 +276,11 @@ func wireCases() []fixtureCase {
 		Type:     "function",
 		Function: protocoltypes.ToolFunctionDefinition{Parameters: map[string]any{}},
 	})
-	resp("response_details_nil", protocoltypes.LLMResponse{})
-	resp("response_details_empty", protocoltypes.LLMResponse{ReasoningDetails: []protocoltypes.ReasoningDetail{}})
+	// Both carry content so the pair differs by exactly the field under test.
+	// LLMResponse{} on its own is byte-identical to response_zero, which made
+	// the "nil vs empty" case a duplicate that pinned nothing.
+	resp("response_details_nil", protocoltypes.LLMResponse{Content: "x"})
+	resp("response_details_empty", protocoltypes.LLMResponse{Content: "x", ReasoningDetails: []protocoltypes.ReasoningDetail{}})
 	resp("response_details_one", protocoltypes.LLMResponse{
 		ReasoningDetails: []protocoltypes.ReasoningDetail{{Format: "plain", Index: 0, Type: "text", Text: "thinking"}},
 	})
@@ -344,7 +355,9 @@ func wireCases() []fixtureCase {
 	msg("message_time_milli", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+1e6, 0)})
 	msg("message_time_nano_trailing_zeros", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+100e6, 0)})
 	msg("message_time_nano_full", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second)+123456789, 0)})
-	msg("message_time_offset_positive", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), 19800)})
+	// A whole-hour zone, which is what the name says. It was +05:30, byte-identical
+	// to message_time_offset_half_hour below it.
+	msg("message_time_offset_positive", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), 3600)})
 	msg("message_time_offset_negative", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), -25200)})
 	msg("message_time_offset_half_hour", protocoltypes.Message{CreatedAt: at(1700000000*int64(time.Second), 19800)})
 	msg("message_time_before_epoch", protocoltypes.Message{CreatedAt: at(-86400*int64(time.Second), 0)})
@@ -421,7 +434,7 @@ func wireCases() []fixtureCase {
 		},
 	})
 
-	out = append(out, wireFuzz(0x5EED^0x17E, 200)...)
+	out = append(out, wireFuzz(seed^0x17E, fuzz*200/1500)...)
 
 	return out
 }
