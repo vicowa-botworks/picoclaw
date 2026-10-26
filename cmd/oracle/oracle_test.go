@@ -24,6 +24,7 @@ func TestCorpusNamesAreUnique(t *testing.T) {
 		{"messages", messageCases(0x5EED, 50)},
 		{"tooldefs", toolDefCases(0x5EED, 50)},
 		{"wire", wireCases(0x5EED, 50)},
+		{"memory", memoryCases()},
 	} {
 		seen := map[string]bool{}
 		for _, c := range tc.cases {
@@ -49,6 +50,7 @@ func TestCorpusInputIsJSONEncodable(t *testing.T) {
 		{"messages", messageCases(1, 200)},
 		{"tooldefs", toolDefCases(1, 200)},
 		{"wire", wireCases(1, 200)},
+		{"memory", memoryCases()},
 	} {
 		for _, c := range tc.cases {
 			if _, err := json.Marshal(c.Input); err != nil {
@@ -404,3 +406,33 @@ func TestWireCorpusIsByteStable(t *testing.T) {
 // wantWireCorpusSHA is sha256 of the rendered default corpus (seed 0x5EED, fuzz
 // 1500) with the fixed provenance above: 248 cases, 48 curated and 200 fuzz.
 const wantWireCorpusSHA = "bfb5d1c1dfcc057ef827180da0759c0d733a7c61d9408a14b8c3678503e16929"
+
+// TestMemoryCorpusIsByteStable is the same pin the wire seam got, for the seam
+// whose expectations move the most: 66 of 68 cases changed when the clock rule
+// did, and the file the port reads lives in another repository, so nothing here
+// could notice the corpus drifting. Two renders of the whole script set must be
+// identical, and the digest must not move without someone deciding it should.
+func TestMemoryCorpusIsByteStable(t *testing.T) {
+	render := func() string {
+		f := emit(provenance{
+			Generator: "cmd/oracle",
+			Repo:      "github.com/sipeed/picoclaw",
+			Commit:    "0123456789abcdef0123456789abcdef01234567",
+			Seed:      0x5EED,
+		}, "x.json", "pkg/memory.JSONLStore", "memory",
+			memoryCases(), func(c fixtureCase) any { return runStoreScript(c.Name, c.script, c.expectErrOp) })
+		return string(f.raw)
+	}
+	first := render()
+	if second := render(); first != second {
+		t.Fatal("the memory corpus is not reproducible: a timestamp is leaking through the mask")
+	}
+	sum := sha256.Sum256([]byte(first))
+	if got := hex.EncodeToString(sum[:]); got != wantMemoryCorpusSHA {
+		t.Errorf("the memory corpus moved.\n got %s\nwant %s\n"+
+			"If the change is intended, update wantMemoryCorpusSHA and regenerate the fixture in "+
+			"rusty-crab/conformance/fixtures from the same commit.", got, wantMemoryCorpusSHA)
+	}
+}
+
+const wantMemoryCorpusSHA = "c0cd6b2b5ea9bd22df693ad2a91ee1f77a9907c1b5c437aee52ff36bca3e1b4d"
