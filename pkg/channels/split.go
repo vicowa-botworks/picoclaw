@@ -2,6 +2,7 @@ package channels
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // SplitMessage splits long messages into chunks, preserving code block integrity.
@@ -91,7 +92,14 @@ func SplitMessage(content string, maxLen int) []string {
 						chunk := strings.TrimRight(string(runes[start:msgEnd]), " \t\n\r") + "\n```"
 						messages = append(messages, chunk)
 						remaining := strings.TrimSpace(header + "\n" + string(runes[msgEnd:totalLen]))
-						if len(remaining) >= totalLen-start {
+						// totalLen-start counts runes and the maxLen budget is
+						// measured in runes, so the comparison has to count
+						// runes too: len() is bytes, and for a body of 3-byte
+						// runes it reports roughly 3x the work, which rejects
+						// the reopen on almost every multi-chunk non-ASCII
+						// message and silently drops the re-opened header and
+						// the closing fence from every later chunk.
+						if utf8.RuneCountInString(remaining) >= totalLen-start {
 							// Reopening the fence left more work than we had
 							// before, so carry on past this chunk instead.
 							start = msgEnd
@@ -123,11 +131,13 @@ func SplitMessage(content string, maxLen int) []string {
 						// header the tail never shrinks and the buffer grows
 						// forever, so only take this branch when the reopen
 						// leaves strictly less work than we started with.
-						canReopen := splitAt > start
+						// The rebuild is lazy: the first case below discards
+						// it, and it is a TrimSpace over the whole tail.
 						var remaining string
-						if canReopen {
+						canReopen := false
+						if unclosedIdx-start <= 20 && splitAt > start {
 							remaining = strings.TrimSpace(header + "\n" + string(runes[splitAt:totalLen]))
-							canReopen = len(remaining) < totalLen-start
+							canReopen = utf8.RuneCountInString(remaining) < totalLen-start
 						}
 						switch {
 						case unclosedIdx-start > 20:
