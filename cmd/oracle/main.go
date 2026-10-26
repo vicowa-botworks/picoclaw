@@ -45,39 +45,42 @@ func main() {
 
 	provenance := readProvenance(*seed)
 
-	emit(provenance, filepath.Join(*out, "tokenizer_estimate_message_tokens.json"),
-		"tokenizer/EstimateMessageTokens",
-		"Content and ReasoningContent are counted in runes; ToolCall and ToolCallID fields are counted in bytes; the scale is a floor division; media is added after scaling.",
-		messageCases(*seed, *fuzzCases),
-		func(c fixtureCase) any { return tokenizer.EstimateMessageTokens(c.message) })
+	// Every file is rendered before any is written: see writeAll.
+	writeAll([]fixtureFile{
+		emit(provenance, filepath.Join(*out, "tokenizer_estimate_message_tokens.json"),
+			"tokenizer/EstimateMessageTokens",
+			"Content and ReasoningContent are counted in runes; ToolCall and ToolCallID fields are counted in bytes; the scale is a floor division; media is added after scaling.",
+			messageCases(*seed, *fuzzCases),
+			func(c fixtureCase) any { return tokenizer.EstimateMessageTokens(c.message) }),
 
-	emit(provenance, filepath.Join(*out, "tokenizer_estimate_tool_defs_tokens.json"),
-		"tokenizer/EstimateToolDefsTokens",
-		"Name and Description are counted in bytes; Parameters contributes len(json.Marshal(x)), i.e. Go's exact encoding including sorted map keys and HTML escaping; a Parameters value that cannot marshal is skipped entirely.",
-		toolDefCases(*seed, *fuzzCases),
-		func(c fixtureCase) any { return tokenizer.EstimateToolDefsTokens(c.defs) })
+		emit(provenance, filepath.Join(*out, "tokenizer_estimate_tool_defs_tokens.json"),
+			"tokenizer/EstimateToolDefsTokens",
+			"Name and Description are counted in bytes; Parameters contributes len(json.Marshal(x)), i.e. Go's exact encoding including sorted map keys and HTML escaping; a Parameters value that cannot marshal is skipped entirely.",
+			toolDefCases(*seed, *fuzzCases),
+			func(c fixtureCase) any { return tokenizer.EstimateToolDefsTokens(c.defs) }),
 
-	emit(provenance, filepath.Join(*out, "protocoltypes_marshal.json"),
-		"pkg/providers/protocoltypes + encoding/json.Marshal",
-		"expected is the exact output of json.Marshal over the described Go value. Field order is declaration order. Absent, null, [] and \"\" are four different encodings and each comes from a different Go value: an omitempty field is dropped for its zero value, a bare field is always emitted, a nil slice or map emits null and an empty one emits [] or {}. time.Time is RFC3339Nano, which trims trailing zeros from the fraction (an exact second has none). StreamChunk has no json tags, so its keys are the Go field names with their original capitalisation. Fields tagged json:\"-\" (Name, Arguments, ThoughtSignature on ToolCall; PromptLayer, PromptSlot, PromptSource everywhere) never appear.",
-		wireCases(),
-		func(c fixtureCase) any { return marshalWire(c.wire) })
+		emit(provenance, filepath.Join(*out, "protocoltypes_marshal.json"),
+			"pkg/providers/protocoltypes + encoding/json.Marshal",
+			"expected is the exact output of json.Marshal over the described Go value, or null when it returns an error -- which it can, because Arguments and Parameters carry arbitrary map[string]any and a NaN, channel or func inside one is a marshaling failure. Such a value is not dropped from input: portable() replaces it with {\"$go_marshal_error\": \"unsupported_type\"} (or NaN, +Inf, -Inf, complex for those), so the refusal is visible in the case rather than silent. Field order is declaration order. Absent, null, [] and \"\" are four different encodings and each comes from a different Go value: an omitempty field is dropped for its zero value -- including an empty non-nil slice or map, which is why media: [] and media: null both omit the key -- a bare field is always emitted, a nil slice or map emits null and an empty one emits [] or {}. time.Time is RFC3339Nano, which trims trailing zeros from the fraction (an exact second has none). StreamChunk has no json tags, so its keys are the Go field names with their original capitalisation. Fields tagged json:\"-\" (Name, Arguments, ThoughtSignature on ToolCall; PromptLayer, PromptSlot, PromptSource everywhere) never appear.",
+			wireCases(*seed, *fuzzCases),
+			func(c fixtureCase) any { return marshalWire(c.wire) }),
 
-	// The tool-defs seam above only exposes json.Marshal through a token count,
-	// so a one-byte encoding difference shows up as an off-by-one estimate and
-	// says nothing about which byte moved. This fixture pins the encoding itself:
-	// expected is the exact output string, or null where json.Marshal errors.
-	emit(provenance, filepath.Join(*out, "go_json_encode_parameters.json"),
-		"encoding/json.Marshal",
-		"expected is the exact output of json.Marshal, or null when it returns an error. Map keys are sorted by byte; <, > and & are escaped as \\u003c \\u003e \\u0026; U+2028 and U+2029 are escaped; \\b and \\f have short forms and the rest of C0 is \\u00XX with lower-case hex; non-ASCII is not escaped. Floats are shortest round-trip, positional in [1e-6, 1e21) and exponent form outside it, with a positive exponent padded to two digits (1e+21) and a negative exponent stripped to one (1e-7, but 5e-324).",
-		paramValueCases(*seed, *fuzzCases),
-		func(c fixtureCase) any {
-			b, err := json.Marshal(c.params)
-			if err != nil {
-				return nil
-			}
-			return string(b)
-		})
+		// The tool-defs seam above only exposes json.Marshal through a token count,
+		// so a one-byte encoding difference shows up as an off-by-one estimate and
+		// says nothing about which byte moved. This fixture pins the encoding itself:
+		// expected is the exact output string, or null where json.Marshal errors.
+		emit(provenance, filepath.Join(*out, "go_json_encode_parameters.json"),
+			"encoding/json.Marshal",
+			"expected is the exact output of json.Marshal, or null when it returns an error. Map keys are sorted by byte; <, > and & are escaped as \\u003c \\u003e \\u0026; U+2028 and U+2029 are escaped; \\b and \\f have short forms and the rest of C0 is \\u00XX with lower-case hex; non-ASCII is not escaped. Floats are shortest round-trip, positional in [1e-6, 1e21) and exponent form outside it, with a positive exponent padded to two digits (1e+21) and a negative exponent stripped to one (1e-7, but 5e-324).",
+			paramValueCases(*seed, *fuzzCases),
+			func(c fixtureCase) any {
+				b, err := json.Marshal(c.params)
+				if err != nil {
+					return nil
+				}
+				return string(b)
+			}),
+	})
 }
 
 // fixtureCase is one row. Exactly one of message / defs is populated, chosen by
@@ -133,7 +136,7 @@ func readProvenance(seed int64) provenance {
 	return p
 }
 
-func emit(p provenance, file, seam, note string, cases []fixtureCase, score func(fixtureCase) any) {
+func emit(p provenance, file, seam, note string, cases []fixtureCase, score func(fixtureCase) any) fixtureFile {
 	fx := fixture{
 		Schema:       SchemaVersion,
 		Generator:    p.Generator,
@@ -162,10 +165,31 @@ func emit(p provenance, file, seam, note string, cases []fixtureCase, score func
 	if err != nil {
 		fail("marshal %s: %v", file, err)
 	}
-	if err := os.WriteFile(file, append(raw, '\n'), 0o644); err != nil {
-		fail("write %s: %v", file, err)
+	return fixtureFile{path: file, raw: append(raw, '\n'), count: fx.CaseCount}
+}
+
+// fixtureFile is a rendered fixture that has not been written yet.
+type fixtureFile struct {
+	path  string
+	raw   []byte
+	count int
+}
+
+// writeAll is the reason render and write are separate. The four files share one
+// source_commit, so a failure on the third must not leave the first two already
+// rewritten at the new commit: a half-regenerated set is exactly what the
+// provenance field exists to prevent. Measured before this existed, a value
+// portable() did not recognize killed the run mid-write and left two fresh files
+// and two stale ones.
+func writeAll(files []fixtureFile) {
+	for _, f := range files {
+		if err := os.WriteFile(f.path, f.raw, 0o644); err != nil {
+			fail("write %s: %v", f.path, err)
+		}
 	}
-	fmt.Printf("%-46s %5d cases\n", filepath.Base(file), fx.CaseCount)
+	for _, f := range files {
+		fmt.Printf("%-46s %5d cases\n", filepath.Base(f.path), f.count)
+	}
 }
 
 func fail(format string, args ...any) {
