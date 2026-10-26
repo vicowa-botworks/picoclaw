@@ -36,7 +36,8 @@ import (
 // verbatim" predicts, and the fixture, not the comment, is what a port is graded
 // against.
 const memoryStoreNote = "input.ops is a script run against a fresh store in an empty directory; " +
-	"expected is {files, result}, or {error, <op>} for the cases that must fail. files maps " +
+	"expected is {files, results}; a case that must fail adds error and still records files " +
+	"and results, because for a refusal the directory is the assertion. files maps " +
 	"each file the store created to its exact contents, with any RFC3339 timestamp replaced " +
 	"by <time> because the value is wall-clock; the timestamp format itself is pinned byte for " +
 	"byte by the protocoltypes fixture. " +
@@ -292,7 +293,12 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		case "write_file":
 			// No store involvement by design: the file is what the script says
 			// it is, and nothing is created alongside it.
-			if filepath.Base(s.name) != s.name || s.name == "" {
+			// Base() refuses every name containing a separator, so nothing can
+			// traverse out. It does not refuse "." or "..", which reach
+			// WriteFile and fail there as an opaque "is a directory" instead of
+			// this message.
+			if filepath.Base(s.name) != s.name || s.name == "" ||
+				s.name == "." || s.name == ".." {
 				failf("memory: case %q writes %q: name must be a bare file name", name, s.name)
 			}
 			err = os.WriteFile(filepath.Join(dir, s.name), []byte(s.text), 0o644)
@@ -321,7 +327,17 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		}
 		if err != nil {
 			if s.op == wantErrOp {
-				return map[string]any{"error": s.op}
+				// A refusal records the directory too. {error, op} on its own
+				// cannot tell "refused" from "refused after writing something",
+				// and for the raw-write rule the empty directory IS the
+				// assertion: the bug this pins is a refusal that still
+				// materialized the session.
+				expected, rerr := record(dir, results)
+				if rerr != nil {
+					failf("memory: read back after expected failure: %v", rerr)
+				}
+				expected["error"] = s.op
+				return expected
 			}
 			failf("memory: step %s on %q: %v", s.op, s.key, err)
 		}
@@ -331,9 +347,20 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		failf("memory: case %q expected %q to fail, and it did not", name, wantErrOp)
 	}
 
+	expected, rerr := record(dir, results)
+	if rerr != nil {
+		failf("memory: read back: %v", rerr)
+	}
+	return expected
+}
+
+// record reads the directory back and masks both halves of the expectation. The
+// success path and the expected-failure path share it so the two shapes cannot
+// drift apart.
+func record(dir string, results []any) (map[string]any, error) {
 	files, err := readStoreDir(dir)
 	if err != nil {
-		failf("memory: read back: %v", err)
+		return nil, err
 	}
 	masked := make([]any, 0, len(results))
 	for _, r := range results {
@@ -341,7 +368,7 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		entry["value"] = maskTimes(entry["value"])
 		masked = append(masked, entry)
 	}
-	return map[string]any{"files": files, "results": masked}
+	return map[string]any{"files": files, "results": masked}, nil
 }
 
 // queryResult tags a query's value with the script step that produced it, so the
@@ -546,6 +573,14 @@ func describeMeta(m memory.SessionMeta) map[string]any {
 // reproducible. Cases that want to observe the store's own stamping pass nil
 // and let the mask absorb the value.
 func at(role, content string, unix int64, nanos int32) protocoltypes.Message {
+	// The mask's rule is "at or after process start means the store stamped
+	// it", so a scripted future stamp is masked away silently: the case looks
+	// like it pins an instant while pinning <time>. Refuse it here rather than
+	// document it and hope.
+	if unix >= generatorStart.Unix()-1 {
+		failf("memory: at(%q) scripts unix=%d, at or after process start: the clock "+
+			"mask would erase it, so the case would pin nothing", role, unix)
+	}
 	t := time.Unix(unix, int64(nanos)).UTC()
 	return protocoltypes.Message{Role: role, Content: content, CreatedAt: &t}
 }
@@ -824,6 +859,15 @@ func memoryCases() []fixtureCase {
 			stepWriteRaw("a/b", "{\"role\":\"user\",\"content\":\"replaced\"}\n"),
 			stepGetHistory("a:b"),
 			stepGetHistory("a/b")),
+		// The other half of that rule, and the only case that reaches it. A raw
+		// write addresses a session that already exists; nothing here creates
+		// one. stemFor used to fall back to UpsertSessionMeta, which meant the
+		// refusal did not exist at all -- and no other case has a raw write on
+		// a key with nothing on disk, so restoring that fallback used to leave
+		// the whole suite green. The empty files map is the assertion: a
+		// refusal that still materialized the session is the bug.
+		memoryCaseErr("raw_write_refused_for_unknown_key", "write_raw",
+			stepWriteRaw("ghost", "{\"role\":\"user\",\"content\":\"orphan\"}\n")),
 		memoryCase("list_skips_unreadable_meta",
 			stepAddSimple("good", "user", "hi"),
 			stepAddSimple("bad", "user", "hi"),
@@ -841,6 +885,20 @@ func memoryCases() []fixtureCase {
 			stepWriteRawMeta("s1",
 				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 1,\n  \"count\": 1,\n  \"bogus\": true\n}"),
 			stepGetHistory("s1"),
+			stepGetMeta("s1")),
+		// describeMeta describes its timestamps rather than pre-masking them, and
+		// until now no case exercised that: every meta in the corpus is stamped
+		// by the store, so the described value was always turned back into
+		// <time> and the capability was indistinguishable from the old blanket
+		// mask. Here the instant is scripted, so both halves must carry it
+		// exactly -- the file bytes byte-for-byte, the result as a described
+		// time. A port that rewrites metadata timestamps on read loses both.
+		memoryCase("meta_timestamp_written_by_hand_is_pinned",
+			stepAddSimple("s1", "user", "hi"),
+			stepWriteRawMeta("s1",
+				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 0,\n  \"count\": 1,\n"+
+					"  \"created_at\": \"2023-11-14T22:13:20.25Z\",\n"+
+					"  \"updated_at\": \"2023-11-14T22:13:21Z\"\n}"),
 			stepGetMeta("s1")),
 		// A meta file whose key is empty is filled in from the requested key on
 		// read, but ListSessions skips it: the listing has no key to report.

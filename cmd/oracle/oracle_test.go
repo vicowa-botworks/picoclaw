@@ -435,4 +435,4 @@ func TestMemoryCorpusIsByteStable(t *testing.T) {
 	}
 }
 
-const wantMemoryCorpusSHA = "c0cd6b2b5ea9bd22df693ad2a91ee1f77a9907c1b5c437aee52ff36bca3e1b4d"
+const wantMemoryCorpusSHA = "9a38cea8bdc2d9d5d2836cc006181e046f6e6b7252e750b35b8046d853425fe0"
