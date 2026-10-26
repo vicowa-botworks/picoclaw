@@ -218,7 +218,20 @@ func writeAll(files []fixtureFile) {
 	}
 }
 
+// exitFunc is what failf terminates with. It is a variable so the harness's own
+// guards are testable: failf is the only way the generator refuses a malformed
+// case, and the refusals that protect the corpus (a write_file name that is "."
+// or "..", an at() instant the clock mask would erase) are exactly the code no
+// fixture can grade -- a case that reaches them never renders, so no expectation
+// moves when they are deleted. A test swaps in a stub that unwinds and asserts
+// the refusal happened; production never reassigns it.
+var exitFunc = os.Exit
+
 func failf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "oracle: "+format+"\n", args...)
-	os.Exit(1)
+	exitFunc(1)
+	// Unreachable while exitFunc is os.Exit. A test stub must unwind (panic or
+	// runtime.Goexit); this is here so a stub that merely returns cannot let the
+	// generator carry on and render a corpus from half-executed cases.
+	panic("oracle: exitFunc returned without unwinding")
 }

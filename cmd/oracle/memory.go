@@ -37,7 +37,11 @@ import (
 // against.
 const memoryStoreNote = "input.ops is a script run against a fresh store in an empty directory; " +
 	"expected is {files, results}; a case that must fail adds error and still records files " +
-	"and results, because for a refusal the directory is the assertion. files maps " +
+	"and results, because for a refusal the directory is the assertion. results lists only " +
+	"the queries that SUCCEEDED: the failing op contributes no entry, because whatever a Go " +
+	"call returns alongside an error is a convention about Go (a nil slice, a zero struct) " +
+	"and not a property of the store, so grading it would fail a correct port. " +
+	"files maps " +
 	"each file the store created to its exact contents, with any RFC3339 timestamp replaced " +
 	"by <time> because the value is wall-clock; the timestamp format itself is pinned byte for " +
 	"byte by the protocoltypes fixture. " +
@@ -266,6 +270,10 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 	// named after (corrupt_line_is_skipped_not_fatal asks for history, then
 	// lists).
 	var results []any
+	// Set by a query branch and appended only once the error check has passed,
+	// so a failing query leaves no entry. See the expected-failure path below.
+	var queryValue any
+	var queryIsQuery bool
 	// Stems learned from the directory, so a case can corrupt a .meta.json and
 	// still address the session by key afterwards.
 	stems := map[string]string{}
@@ -315,13 +323,13 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		case "get_history":
 			var msgs []protocoltypes.Message
 			msgs, err = store.GetHistory(ctx, s.key)
-			results = append(results, queryResult(i, s.op, describeMessages(msgs)))
+			queryValue, queryIsQuery = describeMessages(msgs), true
 		case "get_meta":
 			var meta memory.SessionMeta
 			meta, err = store.GetSessionMeta(ctx, s.key)
-			results = append(results, queryResult(i, s.op, describeMeta(meta)))
+			queryValue, queryIsQuery = describeMeta(meta), true
 		case "list_all":
-			results = append(results, queryResult(i, s.op, describeStrings(store.ListSessions())))
+			queryValue, queryIsQuery = describeStrings(store.ListSessions()), true
 		default:
 			failf("memory: unknown step %q", s.op)
 		}
@@ -332,6 +340,14 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 				// and for the raw-write rule the empty directory IS the
 				// assertion: the bug this pins is a refusal that still
 				// materialized the session.
+				//
+				// The failing query records nothing. Its value would be whatever
+				// Go returned beside the error -- a nil slice for GetHistory, a
+				// zero SessionMeta for GetSessionMeta -- and that is a convention
+				// about Go, not a property of the store: a port that answers a
+				// failed query with [] would fail on the harness's shape instead
+				// of on a bug. So the append below is reached only on success,
+				// and results means "the queries that succeeded".
 				expected, rerr := record(dir, results)
 				if rerr != nil {
 					failf("memory: read back after expected failure: %v", rerr)
@@ -340,6 +356,10 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 				return expected
 			}
 			failf("memory: step %s on %q: %v", s.op, s.key, err)
+		}
+		if queryIsQuery {
+			results = append(results, queryResult(i, s.op, queryValue))
+			queryIsQuery = false
 		}
 	}
 
@@ -468,8 +488,9 @@ func readStoreDir(dir string) (map[string]string, error) {
 // Masking every timestamp used to hide the scripted ones too, and timestamps are
 // the only field in a .jsonl line that ever varies: jsonl_two_messages_exact_bytes
 // pins created_at values chosen so the bytes are reproducible, and mutating at()
-// to stamp time.Now() instead of the caller's value moved exactly one of the 68
-// expectations. RFC3339Nano fraction trimming -- .100000000 to .1, no fraction for
+// to stamp time.Now() instead of the caller's value moved exactly one expectation
+// (measured when the corpus was 68 cases; the count is 71 now and the one case is
+// still the one). RFC3339Nano fraction trimming -- .100000000 to .1, no fraction for
 // an exact second -- was therefore pinned nowhere in the fixture whose whole job
 // is the file.
 //
@@ -481,7 +502,7 @@ func readStoreDir(dir string) (map[string]string, error) {
 func maskStoreClock(s string) string {
 	return timeMask.ReplaceAllStringFunc(s, func(match string) string {
 		t, err := time.Parse(time.RFC3339Nano, match)
-		if err != nil || t.Unix() >= generatorStart.Unix()-1 {
+		if err != nil || erasedByClockMask(t.Unix()) {
 			return maskedTime
 		}
 		return match
@@ -498,6 +519,19 @@ func maskStoreClock(s string) string {
 // local offset, so without the mask this file would record -14400 on one machine
 // and +0800 on another, and the port would fail for a reason that is not a bug.
 var generatorStart = time.Now()
+
+// erasedByClockMask is the single statement of the rule the whole memory fixture
+// turns on: an instant at or after process start can only have come from the code
+// under test, because every scripted time in this file is a constant in the past.
+//
+// Three places apply it -- maskStoreClock erases it from file bytes,
+// stampedByStore erases it from a described time, and at() refuses to script one
+// -- and they must agree exactly, or the guard and the mask drift: a scripted
+// instant the mask eats but at() allows is a case that silently pins nothing.
+// Having the threshold three times in three functions is how that drift starts.
+func erasedByClockMask(unix int64) bool {
+	return unix >= generatorStart.Unix()-1
+}
 
 // maskTimes applies the same rule to a query result: any timestamp string, and
 // any described time the store itself produced, becomes <time>.
@@ -535,7 +569,7 @@ func stampedByStore(v map[string]any) bool {
 	}
 	_, hasNanos := v["nanos"]
 	_, hasOffset := v["offset_seconds"]
-	return hasNanos && hasOffset && unix >= generatorStart.Unix()-1
+	return hasNanos && hasOffset && erasedByClockMask(unix)
 }
 
 func describeMeta(m memory.SessionMeta) map[string]any {
@@ -577,7 +611,7 @@ func at(role, content string, unix int64, nanos int32) protocoltypes.Message {
 	// it", so a scripted future stamp is masked away silently: the case looks
 	// like it pins an instant while pinning <time>. Refuse it here rather than
 	// document it and hope.
-	if unix >= generatorStart.Unix()-1 {
+	if erasedByClockMask(unix) {
 		failf("memory: at(%q) scripts unix=%d, at or after process start: the clock "+
 			"mask would erase it, so the case would pin nothing", role, unix)
 	}
