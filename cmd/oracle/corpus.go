@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -487,6 +488,15 @@ func portable(v any) any {
 	case func(), chan int:
 		return map[string]any{ErrorUnmarshalable: "unsupported_type"}
 	default:
+		// Exact-type matching misses the rest of the unmarshalable family -- a
+		// chan string, a func(int), a []float64 holding NaN -- and the old
+		// behavior was to hand it to the fixture's own json.Marshal, which
+		// fails the run partway through writing four files. Probing the encoder
+		// here keeps the marker contract total: anything Go refuses is marked,
+		// so the corpus either writes completely or not at all.
+		if _, err := json.Marshal(x); err != nil {
+			return map[string]any{ErrorUnmarshalable: "unsupported_type"}
+		}
 		return x
 	}
 }

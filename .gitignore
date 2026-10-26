@@ -74,3 +74,6 @@ docker/data
 
 .omc/
 .worktrees/
+
+# oracle generator binary (go build -o oracle ./cmd/oracle)
+/oracle
