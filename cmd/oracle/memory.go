@@ -761,6 +761,37 @@ func memoryCases() []fixtureCase {
 			stepAdd("s1", at("user", "1", 1700000000, 0)),
 			stepCompact("s1"),
 			stepGetMeta("s1")),
+		// Compact reads the metadata, then writes the metadata, then rewrites the
+		// file. A meta that cannot be read is refused before anything happens; a
+		// meta that reads fine but cannot be marshaled is refused between the two
+		// writes, and only the recorded directory tells that apart from a port
+		// that rewrites the file first -- which would have deleted what the Go
+		// store still considers recoverable. That is why a refused step records
+		// the files as well as the op.
+		//
+		// The offset is what makes the meta unwritable rather than unreadable. Go
+		// range-checks the zone hour only on the positive side when parsing, so
+		// -24:00 loads, and MarshalJSON then refuses it: "timezone hour outside of
+		// range [0,23]". A port that validates the offset on the way in refuses a
+		// file the Go store reads, and one that validates it nowhere writes a
+		// stamp it can never read back.
+		memoryCaseErr("compact_with_unwritable_meta_leaves_the_file_alone", "compact",
+			stepAddSimple("s1", "user", "first"),
+			stepAddSimple("s1", "user", "second"),
+			stepTruncate("s1", 1),
+			stepWriteRawMeta("s1",
+				"{\"key\": \"s1\", \"count\": 2, \"skip\": 1, "+
+					"\"created_at\": \"0001-01-01T00:00:00-24:00\"}"),
+			stepCompact("s1")),
+		// The read half of the same rule: SessionMeta.Scope is a
+		// json.RawMessage, so bad bytes are refused by the decoder, not by the
+		// encoder, and compact never gets as far as deciding what to write.
+		memoryCaseErr("compact_with_unreadable_meta_errors", "compact",
+			stepAddSimple("s1", "user", "first"),
+			stepAddSimple("s1", "user", "second"),
+			stepTruncate("s1", 1),
+			stepWriteRawMeta("s1", "{\"key\": \"s1\", \"count\": 2, \"skip\": 1, \"scope\": <1>}"),
+			stepCompact("s1")),
 		// skip counts raw lines, so a blank line between two messages does not
 		// consume a slot but a corrupt one does.
 		memoryCase("blank_lines_do_not_count_toward_skip",
@@ -786,6 +817,20 @@ func memoryCases() []fixtureCase {
 			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\n"+
 				"{\"role\":\"user\",\"content\":\"trunc"),
 			stepTruncate("s1", 1),
+			stepGetMeta("s1")),
+		// keep_last counts *retained* messages while skip is a *raw* offset, and
+		// every case above has the two coincide, so the arithmetic that converts
+		// one to the other was pinned nowhere. With a corrupt line in the middle
+		// they part: the retained line just before the one being kept is raw
+		// line 1, while raw_count-keep_last says 2. The history is the same under
+		// both -- the corrupt line is skipped either way -- so meta.skip is the
+		// only place the difference is visible.
+		memoryCase("truncate_with_a_corrupt_line_in_the_middle",
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\n"+
+				"{\"role\":\"user\",\"content\":\n"+
+				"{\"role\":\"user\",\"content\":\"3\"}\n"),
+			stepTruncate("s1", 1),
+			stepGetHistory("s1"),
 			stepGetMeta("s1")),
 		memoryCase("empty_file_reads_as_no_history",
 			stepWriteFile("s1.jsonl", ""),
@@ -933,6 +978,56 @@ func memoryCases() []fixtureCase {
 				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 0,\n  \"count\": 1,\n"+
 					"  \"created_at\": \"2023-11-14T22:13:20.25Z\",\n"+
 					"  \"updated_at\": \"2023-11-14T22:13:21Z\"\n}"),
+			stepGetMeta("s1")),
+		// The case above reads the hand-written meta back, which only proves the
+		// decoder keeps the instant. Here the store writes the file again, and
+		// SetSummary stamps created_at only when the meta has none -- so the
+		// scripted instant has to survive the rewrite byte for byte while
+		// updated_at moves to the store's clock. Every other summary case starts
+		// from a store-stamped meta, where both halves are masked to <time> and an
+		// implementation that overwrites created_at unconditionally is invisible.
+		memoryCase("set_summary_keeps_a_hand_written_created_at",
+			stepAddSimple("s1", "user", "hi"),
+			stepWriteRawMeta("s1",
+				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 0,\n  \"count\": 1,\n"+
+					"  \"created_at\": \"2023-11-14T22:13:20.25Z\",\n"+
+					"  \"updated_at\": \"2023-11-14T22:13:21Z\"\n}"),
+			stepSetSummary("s1", "summarised"),
+			stepGetMeta("s1")),
+		// writeMeta marshals the struct it was handed; only UpsertSessionMeta
+		// calls normalizeAliases. So a meta written by hand with blanks,
+		// duplicates and the canonical key inside its alias list keeps all of
+		// them through the next write. A port that normalizes on every write
+		// rewrites a user's file into a shape the Go store never produces, and
+		// the aliases it drops are how a session is found by ListSessions.
+		memoryCase("set_summary_keeps_aliases_verbatim",
+			stepAddSimple("s1", "user", "hi"),
+			stepWriteRawMeta("s1",
+				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 0,\n  \"count\": 1,\n"+
+					"  \"aliases\": [\"\", \"a\", \"a\", \"s1\", \" b \"]\n}"),
+			stepSetSummary("s1", "summarised"),
+			stepGetMeta("s1")),
+		// The offset Go refuses to *marshal* still describes fine, and this is the
+		// read where a port learns the instant really carries -24h. A port that
+		// validates the offset on the way in refuses the file outright; one that
+		// quietly zeroes it reports year 1 with a zero offset, which is a
+		// different instant and the one it would write back next.
+		memoryCase("meta_with_an_unmarshalable_offset_still_reads",
+			stepAddSimple("s1", "user", "hi"),
+			stepWriteRawMeta("s1",
+				"{\"key\": \"s1\", \"count\": 1, \"skip\": 0, "+
+					"\"created_at\": \"0001-01-01T00:00:00-24:00\"}"),
+			stepGetMeta("s1")),
+		// A stamp that is not a timestamp at all is a decode failure, not a zero:
+		// GetSessionMeta refuses rather than answering with the zero time, and the
+		// file on disk is untouched either way. A port that defaults an
+		// unparseable created_at to year 1 loads the session and then writes that
+		// year back over the user's real stamp.
+		memoryCaseErr("meta_with_unparseable_created_at_errors", "get_meta",
+			stepAddSimple("s1", "user", "hi"),
+			stepWriteRawMeta("s1",
+				"{\"key\": \"s1\", \"count\": 1, \"skip\": 0, "+
+					"\"created_at\": \"2023-11-14 22:13:20\"}"),
 			stepGetMeta("s1")),
 		// A meta file whose key is empty is filled in from the requested key on
 		// read, but ListSessions skips it: the listing has no key to report.
