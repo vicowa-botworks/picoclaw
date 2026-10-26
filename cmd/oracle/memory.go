@@ -66,7 +66,18 @@ const memoryStoreNote = "input.ops is a script run against a fresh store in an e
 	"thoughts, stamps any missing created_at and zeroes skip. ListSessions is driven by the " +
 	".meta.json files in directory order and reports the canonical key from each, so a key with " +
 	"':' is listed with its ':' even though its file uses '_'; a meta file that does not decode, " +
-	"or whose key is empty, is not listed, and an orphan .jsonl is invisible."
+	"or whose key is empty, is not listed, and an orphan .jsonl is invisible. " +
+	"Three ops put files on disk without the store writing them. write_raw and write_raw_meta " +
+	"replace a session's .jsonl or .meta.json by key, and resolve that key to a path by asking " +
+	"the store which file it maps to -- never by recomputing the sanitiser -- and they refuse a " +
+	"key with no session on disk rather than creating one, because a harness that manufactures " +
+	"the thing a case is named for cannot pin its absence. write_file drops a literal file name " +
+	"into the directory with no store involvement at all, which is the only way to script a state " +
+	"the store cannot produce: an orphan .jsonl with no metadata. " +
+	"Files and query results share one clock rule: a timestamp at or after the generator started " +
+	"is the store's own and becomes <time>, an earlier one was scripted by the case and is " +
+	"recorded byte-exact, because the only field in a .jsonl line that ever varies is created_at " +
+	"and hiding it would hide RFC3339Nano fraction trimming and the local offset with it."
 
 // timeMask matches anything Go's time.Time encoder produces. It is deliberately
 // permissive: the point is to hide the value, and a port that writes a
@@ -83,6 +94,7 @@ const maskedTime = "<time>"
 type storeStep struct {
 	op      string
 	key     string
+	name    string // literal file name, for write_file only
 	msg     *protocoltypes.Message
 	msgs    []protocoltypes.Message
 	role    string
@@ -126,6 +138,9 @@ func (s storeStep) describe() map[string]any {
 		out["aliases"] = describeStrings(s.aliases)
 	case "write_raw", "write_raw_meta":
 		out["key"] = s.key
+		out["content"] = s.text
+	case "write_file":
+		out["name"] = s.name
 		out["content"] = s.text
 	case "get_history", "get_meta":
 		out["key"] = s.key
@@ -187,6 +202,15 @@ func stepWriteRawMeta(key, content string) storeStep {
 	return storeStep{op: "write_raw_meta", key: key, text: content}
 }
 
+// stepWriteFile drops a literal file into the store directory without the store
+// ever being told it exists. This is the only way to script a state the store
+// cannot produce itself -- an orphan .jsonl with no metadata -- because the
+// key-addressed raw writes below refuse to invent a session: a harness that
+// creates the thing a case is named for cannot pin its absence.
+func stepWriteFile(name, content string) storeStep {
+	return storeStep{op: "write_file", name: name, text: content}
+}
+
 func stepGetHistory(key string) storeStep { return storeStep{op: "get_history", key: key} }
 func stepGetMeta(key string) storeStep    { return storeStep{op: "get_meta", key: key} }
 func stepList() storeStep                 { return storeStep{op: "list_all"} }
@@ -235,9 +259,17 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 	defer store.Close()
 
 	ctx := context.Background()
-	var result any
+	// One entry per query the script issued, tagged with the op that produced
+	// it. Keeping only the last query would drop the assertion in cases that
+	// query twice -- and in several of them the dropped one is what the case is
+	// named after (corrupt_line_is_skipped_not_fatal asks for history, then
+	// lists).
+	var results []any
+	// Stems learned from the directory, so a case can corrupt a .meta.json and
+	// still address the session by key afterwards.
+	stems := map[string]string{}
 
-	for _, s := range steps {
+	for i, s := range steps {
 		switch s.op {
 		case "add":
 			err = store.AddFullMessage(ctx, s.key, *s.msg)
@@ -257,9 +289,16 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 				scope = json.RawMessage(s.scope)
 			}
 			err = store.UpsertSessionMeta(ctx, s.key, scope, s.aliases)
+		case "write_file":
+			// No store involvement by design: the file is what the script says
+			// it is, and nothing is created alongside it.
+			if filepath.Base(s.name) != s.name || s.name == "" {
+				fail("memory: case %q writes %q: name must be a bare file name", name, s.name)
+			}
+			err = os.WriteFile(filepath.Join(dir, s.name), []byte(s.text), 0o644)
 		case "write_raw", "write_raw_meta":
 			var stem string
-			stem, err = stemFor(ctx, store, dir, s.key)
+			stem, err = stemFor(ctx, store, dir, s.key, stems)
 			if err == nil {
 				suffix := ".jsonl"
 				if s.op == "write_raw_meta" {
@@ -270,13 +309,13 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		case "get_history":
 			var msgs []protocoltypes.Message
 			msgs, err = store.GetHistory(ctx, s.key)
-			result = describeMessages(msgs)
+			results = append(results, queryResult(i, s.op, describeMessages(msgs)))
 		case "get_meta":
 			var meta memory.SessionMeta
 			meta, err = store.GetSessionMeta(ctx, s.key)
-			result = describeMeta(meta)
+			results = append(results, queryResult(i, s.op, describeMeta(meta)))
 		case "list_all":
-			result = describeStrings(store.ListSessions())
+			results = append(results, queryResult(i, s.op, describeStrings(store.ListSessions())))
 		default:
 			fail("memory: unknown step %q", s.op)
 		}
@@ -296,7 +335,20 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 	if err != nil {
 		fail("memory: read back: %v", err)
 	}
-	return map[string]any{"files": files, "result": maskTimes(result)}
+	masked := make([]any, 0, len(results))
+	for _, r := range results {
+		entry := r.(map[string]any)
+		entry["value"] = maskTimes(entry["value"])
+		masked = append(masked, entry)
+	}
+	return map[string]any{"files": files, "results": masked}
+}
+
+// queryResult tags a query's value with the script step that produced it, so the
+// Rust replay grades each assertion against the right op instead of guessing
+// which of two queries the case cared about.
+func queryResult(index int, op string, value any) any {
+	return map[string]any{"op_index": index, "op": op, "value": value}
 }
 
 // stemFor asks the store which file a key maps to, rather than computing it
@@ -304,26 +356,38 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 // the mapping from the store's behavior, so the oracle refuses to duplicate
 // sanitizeKey and risk agreeing with itself.
 //
-// It works by letting the store create the .meta.json for the key and then
-// reading the stem back off the directory: the two files share one stem. A meta
-// file that no longer decodes is matched by its stem instead, so a case can
-// corrupt a meta file and still address it.
+// It never creates anything. It used to fall back to UpsertSessionMeta, which
+// meant a raw write silently materialized the session it was supposed to find:
+// list_ignores_orphan_jsonl pinned orphan.meta.json in its own expectation, so
+// the case named for an orphan being invisible required the orphan to be listed.
+// A key with nothing on disk is an error now; write_file is how a script creates
+// a file the store has never heard of.
+//
+// The key is resolved through the store first. SessionMeta.Key holds the
+// canonical key, so after `add a:b` a raw write addressed as the alias a/b would
+// never match -- and a:b and a/b are one session, which is exactly what
+// name_collision_colon_and_slash pins. Stems already seen in this script are
+// cached, so corrupting a .meta.json does not make the session unaddressable.
 func stemFor(
 	ctx context.Context,
 	store *memory.JSONLStore,
 	dir, key string,
+	stems map[string]string,
 ) (string, error) {
-	stem, found := findStemByKey(dir, key)
-	if found {
+	if stem, ok := stems[key]; ok {
 		return stem, nil
 	}
-	if err := store.UpsertSessionMeta(ctx, key, nil, nil); err != nil {
-		return "", err
+	canonical := key
+	if meta, err := store.GetSessionMeta(ctx, key); err == nil && meta.Key != "" {
+		canonical = meta.Key
 	}
-	stem, found = findStemByKey(dir, key)
+	stem, found := findStemByKey(dir, canonical)
 	if !found {
-		return "", fmt.Errorf("no meta file found for key %q", key)
+		return "", fmt.Errorf(
+			"no session on disk for key %q: raw writes address an existing session; "+
+				"use write_file to create a file the store never made", key)
 	}
+	stems[key], stems[canonical] = stem, stem
 	return stem, nil
 }
 
@@ -367,9 +431,34 @@ func readStoreDir(dir string) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		files[entry.Name()] = timeMask.ReplaceAllString(string(data), maskedTime)
+		files[entry.Name()] = maskStoreClock(string(data))
 	}
 	return files, nil
+}
+
+// maskStoreClock rewrites only the timestamps the store itself produced.
+//
+// Masking every timestamp used to hide the scripted ones too, and timestamps are
+// the only field in a .jsonl line that ever varies: jsonl_two_messages_exact_bytes
+// pins created_at values chosen so the bytes are reproducible, and mutating at()
+// to stamp time.Now() instead of the caller's value moved exactly one of the 68
+// expectations. RFC3339Nano fraction trimming -- .100000000 to .1, no fraction for
+// an exact second -- was therefore pinned nowhere in the fixture whose whole job
+// is the file.
+//
+// The rule is the one already used for query results: an instant at or after
+// process start can only have come from the code under test, because every
+// scripted time in this file is a constant in the past. A match that does not
+// parse is still masked -- determinism outranks pinning, and the regex only
+// matches RFC3339-shaped text in the first place.
+func maskStoreClock(s string) string {
+	return timeMask.ReplaceAllStringFunc(s, func(match string) string {
+		t, err := time.Parse(time.RFC3339Nano, match)
+		if err != nil || t.Unix() >= generatorStart.Unix()-1 {
+			return maskedTime
+		}
+		return match
+	})
 }
 
 // generatorStart is the moment this process began. It is the line between a
@@ -427,13 +516,17 @@ func describeMeta(m memory.SessionMeta) map[string]any {
 	if len(m.Scope) > 0 {
 		scope = string(m.Scope)
 	}
+	// Described, not pre-masked: every meta timestamp in the corpus is
+	// store-stamped, so stampedByStore still turns these into <time>, but a
+	// scripted one -- a file written by write_raw_meta with a fixed created_at,
+	// then read back -- is now pinable instead of unconditionally hidden.
 	created := any(nil)
 	if !m.CreatedAt.IsZero() {
-		created = maskedTime
+		created = describeTime(&m.CreatedAt)
 	}
 	updated := any(nil)
 	if !m.UpdatedAt.IsZero() {
-		updated = maskedTime
+		updated = describeTime(&m.UpdatedAt)
 	}
 	return map[string]any{
 		"key":        m.Key,
@@ -602,14 +695,14 @@ func memoryCases() []fixtureCase {
 		// skip counts raw lines, so a blank line between two messages does not
 		// consume a slot but a corrupt one does.
 		memoryCase("blank_lines_do_not_count_toward_skip",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\"}\n\n"+
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\n\n"+
 				"{\"role\":\"user\",\"content\":\"2\"}\n\n"+
 				"{\"role\":\"user\",\"content\":\"3\"}\n"),
 			stepTruncate("s1", 1),
 			stepGetHistory("s1"),
 			stepGetMeta("s1")),
 		memoryCase("corrupt_line_is_skipped_not_fatal",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\"}\n"+
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\n"+
 				"{\"role\":\"user\",\"content\":\n"+
 				"{\"role\":\"user\",\"content\":\"3\"}\n"),
 			stepGetHistory("s1"),
@@ -617,39 +710,39 @@ func memoryCases() []fixtureCase {
 		// The torn line is the crash signature. It is the last line, so the
 		// recovery is "drop the tail", and it still occupies a raw slot.
 		memoryCase("torn_final_line_is_dropped",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\"}\n"+
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\n"+
 				"{\"role\":\"user\",\"content\":\"trunc"),
 			stepGetHistory("s1")),
 		memoryCase("torn_final_line_counts_in_skip",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\"}\n"+
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\n"+
 				"{\"role\":\"user\",\"content\":\"trunc"),
 			stepTruncate("s1", 1),
 			stepGetMeta("s1")),
 		memoryCase("empty_file_reads_as_no_history",
-			stepWriteRaw("s1", ""),
+			stepWriteFile("s1.jsonl", ""),
 			stepGetHistory("s1"),
 			stepList()),
 		memoryCase("only_blank_lines",
-			stepWriteRaw("s1", "\n\n\n"),
+			stepWriteFile("s1.jsonl", "\n\n\n"),
 			stepGetHistory("s1")),
 		memoryCase("crlf_line_endings",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\"}\r\n"),
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}\r\n"),
 			stepGetHistory("s1")),
 		memoryCase("no_trailing_newline",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\"}"),
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\"}"),
 			stepGetHistory("s1")),
 		// A line the store would never write: valid JSON, wrong shape. Go's
 		// decoder ignores unknown members, so this decodes to a zero Message.
 		memoryCase("unknown_fields_are_ignored",
-			stepWriteRaw("s1", "{\"role\":\"user\",\"content\":\"1\",\"bogus\":42}\n"),
+			stepWriteFile("s1.jsonl", "{\"role\":\"user\",\"content\":\"1\",\"bogus\":42}\n"),
 			stepGetHistory("s1")),
 		memoryCase("json_array_line_is_corrupt",
-			stepWriteRaw("s1", "[1,2,3]\n"),
+			stepWriteFile("s1.jsonl", "[1,2,3]\n"),
 			stepGetHistory("s1")),
 		// A transient thought already on disk is filtered on read, so a session
 		// written by an older build hides it the same way.
 		memoryCase("transient_thought_on_disk_is_filtered_on_read",
-			stepWriteRaw("s1", `{"role":"assistant","content":"",`+
+			stepWriteFile("s1.jsonl", `{"role":"assistant","content":"",`+
 				`"reasoning_content":"hmm","created_at":"2023-11-14T22:13:20Z"}`+"\n"),
 			stepGetHistory("s1")),
 
@@ -709,9 +802,28 @@ func memoryCases() []fixtureCase {
 			stepList()),
 		// The listing is driven by meta files: a stray .jsonl with no meta is
 		// invisible, and a meta file the decoder rejects is skipped entirely.
+		// write_file, not write_raw: the store must never see this key, or the
+		// metadata it writes would make the orphan listable and the case would
+		// pin the opposite of its name. Measured against the real store, the
+		// listing is empty and the reads create nothing.
+		// The reads are part of the case: the store must not repair the orphan
+		// by noticing it. Measured against the real store, GetHistory returns the
+		// one line with no error, GetSessionMeta answers with the key and zeroes,
+		// and the directory still holds only the .jsonl afterwards.
 		memoryCase("list_ignores_orphan_jsonl",
-			stepWriteRaw("orphan", "{}\n"),
+			stepWriteFile("orphan.jsonl", "{}\n"),
+			stepGetHistory("orphan"),
+			stepGetMeta("orphan"),
 			stepList()),
+		// a:b and a/b are one session (name_collision_colon_and_slash), so a raw
+		// write addressed through the alias has to land on the canonical file.
+		// Resolving it means asking the store for the canonical key: SessionMeta
+		// stores that, so matching the alias against meta.Key never hits.
+		memoryCase("raw_write_through_alias_hits_the_canonical_file",
+			stepAddSimple("a:b", "user", "original"),
+			stepWriteRaw("a/b", "{\"role\":\"user\",\"content\":\"replaced\"}\n"),
+			stepGetHistory("a:b"),
+			stepGetHistory("a/b")),
 		memoryCase("list_skips_unreadable_meta",
 			stepAddSimple("good", "user", "hi"),
 			stepAddSimple("bad", "user", "hi"),
