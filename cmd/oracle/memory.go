@@ -249,13 +249,13 @@ func memoryCaseErr(name, wantErrOp string, steps ...storeStep) fixtureCase {
 func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 	dir, err := os.MkdirTemp("", "picoclaw-oracle-memory-")
 	if err != nil {
-		fail("memory: temp dir: %v", err)
+		failf("memory: temp dir: %v", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	store, err := memory.NewJSONLStore(dir)
 	if err != nil {
-		fail("memory: new store: %v", err)
+		failf("memory: new store: %v", err)
 	}
 	defer store.Close()
 
@@ -299,7 +299,7 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 			// this message.
 			if filepath.Base(s.name) != s.name || s.name == "" ||
 				s.name == "." || s.name == ".." {
-				fail("memory: case %q writes %q: name must be a bare file name", name, s.name)
+				failf("memory: case %q writes %q: name must be a bare file name", name, s.name)
 			}
 			err = os.WriteFile(filepath.Join(dir, s.name), []byte(s.text), 0o644)
 		case "write_raw", "write_raw_meta":
@@ -323,7 +323,7 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 		case "list_all":
 			results = append(results, queryResult(i, s.op, describeStrings(store.ListSessions())))
 		default:
-			fail("memory: unknown step %q", s.op)
+			failf("memory: unknown step %q", s.op)
 		}
 		if err != nil {
 			if s.op == wantErrOp {
@@ -334,22 +334,22 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 				// materialized the session.
 				expected, rerr := record(dir, results)
 				if rerr != nil {
-					fail("memory: read back after expected failure: %v", rerr)
+					failf("memory: read back after expected failure: %v", rerr)
 				}
 				expected["error"] = s.op
 				return expected
 			}
-			fail("memory: step %s on %q: %v", s.op, s.key, err)
+			failf("memory: step %s on %q: %v", s.op, s.key, err)
 		}
 	}
 
 	if wantErrOp != "" {
-		fail("memory: case %q expected %q to fail, and it did not", name, wantErrOp)
+		failf("memory: case %q expected %q to fail, and it did not", name, wantErrOp)
 	}
 
 	expected, rerr := record(dir, results)
 	if rerr != nil {
-		fail("memory: read back: %v", rerr)
+		failf("memory: read back: %v", rerr)
 	}
 	return expected
 }
@@ -578,7 +578,7 @@ func at(role, content string, unix int64, nanos int32) protocoltypes.Message {
 	// like it pins an instant while pinning <time>. Refuse it here rather than
 	// document it and hope.
 	if unix >= generatorStart.Unix()-1 {
-		fail("memory: at(%q) scripts unix=%d, at or after process start: the clock "+
+		failf("memory: at(%q) scripts unix=%d, at or after process start: the clock "+
 			"mask would erase it, so the case would pin nothing", role, unix)
 	}
 	t := time.Unix(unix, int64(nanos)).UTC()

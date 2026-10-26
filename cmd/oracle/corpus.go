@@ -12,7 +12,7 @@ import (
 // The corpus is deliberately adversarial about the two things this seam gets
 // wrong most easily: content is measured in runes while the tool-call fields are
 // measured in bytes, and Parameters is measured as the byte length of Go's JSON
-// encoding, not as a re-serialisation of the value.
+// encoding, not as a re-serialization of the value.
 
 // ------------------------------------------------------------------ messages --
 
@@ -90,7 +90,8 @@ var toolCallSamples = []struct {
 }
 
 func messageCases(seed int64, fuzz int) []fixtureCase {
-	var out []fixtureCase
+	out := make([]fixtureCase, 0,
+		len(contentSamples)+2*len(systemPartSamples)+len(toolCallSamples)+5+fuzz)
 
 	// Curated: every content sample against a fixed remainder, then the
 	// system-part and tool-call matrices against a fixed content.
@@ -124,7 +125,13 @@ func messageCases(seed int64, fuzz int) []fixtureCase {
 	return out
 }
 
-func messageCase(name, content, reasoning string, parts []string, calls []protocoltypes.ToolCall, toolCallID string, mediaCount ...int) fixtureCase {
+func messageCase(
+	name, content, reasoning string,
+	parts []string,
+	calls []protocoltypes.ToolCall,
+	toolCallID string,
+	mediaCount ...int,
+) fixtureCase {
 	media := 0
 	if len(mediaCount) > 0 {
 		media = mediaCount[0]
@@ -285,10 +292,10 @@ func randToken(rng *rand.Rand) string {
 	return randText(rng, 1, 16)
 }
 
-func randText(rng *rand.Rand, min, max int) string {
-	n := min
-	if max > min {
-		n += rng.Intn(max - min + 1)
+func randText(rng *rand.Rand, lo, hi int) string {
+	n := lo
+	if hi > lo {
+		n += rng.Intn(hi - lo + 1)
 	}
 	b := make([]rune, 0, n)
 	for i := 0; i < n; i++ {
@@ -300,7 +307,7 @@ func randText(rng *rand.Rand, min, max int) string {
 // --------------------------------------------------------------- tool defs --
 
 // parameterSamples pins len(json.Marshal(Parameters)) against the parts of Go's
-// encoder a hand-written serialiser gets wrong: key ordering, HTML escaping,
+// encoder a hand-written serializer gets wrong: key ordering, HTML escaping,
 // float formatting, and values that fail to marshal at all.
 var parameterSamples = []struct {
 	name  string
@@ -435,7 +442,7 @@ func toolDefCase(name string, defs []protocoltypes.ToolDefinition) fixtureCase {
 }
 
 // ErrorUnmarshalable is the key a fixture uses to stand in for a value Go's
-// json.Marshal refuses. The estimator's behaviour for those is to skip the whole
+// json.Marshal refuses. The estimator's behavior for those is to skip the whole
 // Parameters value, so the Rust side only needs the marker's presence, not the
 // specific type.
 const ErrorUnmarshalable = "$go_marshal_error"

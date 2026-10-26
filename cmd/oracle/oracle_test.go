@@ -70,7 +70,7 @@ func TestPortableMarksUnmarshalableValues(t *testing.T) {
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
-		t.Fatalf("marshalling portable output: %v", err)
+		t.Fatalf("marshaling portable output: %v", err)
 	}
 	var back map[string]any
 	if err := json.Unmarshal(raw, &back); err != nil {
