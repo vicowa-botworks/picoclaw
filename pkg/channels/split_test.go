@@ -3,6 +3,7 @@ package channels
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSplitMessage(t *testing.T) {
@@ -359,4 +360,199 @@ func TestSplitMessage_CodeBlockIntegrity(t *testing.T) {
 	if len([]rune(chunks[0])) > 40 {
 		t.Errorf("First chunk exceeded maxLen: length %d runes", len([]rune(chunks[0])))
 	}
+}
+
+// TestSplitMessageTinyMaxLenTerminates guards an infinite loop. When a chunk
+// would end inside a code block the splitter closes the block with an injected
+// "\n```" and re-opens it by prepending the original header to the unconsumed
+// tail. The next pass reads that header back as a block of its own, so unless
+// the chunk reaches past the header the tail never shrinks: the buffer grows by
+// len(header)+1 runes per pass and the original text is never reached. With a
+// 3-rune header that happens for maxLen up to 8, so SplitMessage("```abc", 5)
+// and SplitMessage("```"+strings.Repeat("a",500), 9) never returned.
+//
+// Fence integrity cannot be preserved in a chunk that small, so both reopen
+// sites now check that the reopen actually shrinks the work left and fall back
+// to a plain split when it does not.
+//
+// splitWithin names the case that fails: a regression here is a hang, and
+// without the watchdog the only symptom is the package hitting the Go test
+// timeout with an all-goroutine dump.
+func TestSplitMessageTinyMaxLenTerminates(t *testing.T) {
+	inputs := []string{
+		"```abc",
+		"a\n```abc",
+		"```" + strings.Repeat("a", 500),
+		strings.Repeat("```f\nx\n```\n", 60),
+		strings.Repeat("a\n", 400) + "```",
+		"```go\n" + strings.Repeat("fmt.Println(\"hi\")\n", 100) + "```",
+		"intro text\n\n" + strings.Repeat("```rs\nfn main() {}\n```\nprose ", 20),
+		"```" + strings.Repeat("語", 500),
+		"```go\n" + strings.Repeat("fmt.Println(\"héllo\")\n", 100) + "```",
+		"```🚀" + strings.Repeat("launch ok ✅\n", 90),
+		strings.Repeat("مرحبا\n", 400) + "```",
+	}
+
+	for _, in := range inputs {
+		for maxLen := 1; maxLen <= 20; maxLen++ {
+			chunks := splitWithin(t, in, maxLen, 5*time.Second)
+
+			if len(chunks) == 0 {
+				t.Errorf("maxLen %d: no chunks returned for %q", maxLen, shortInput(in))
+				continue
+			}
+			for i, c := range chunks {
+				if c == "" {
+					t.Errorf("maxLen %d: chunk %d is empty for %q", maxLen, i, shortInput(in))
+				}
+				if n := len([]rune(c)); n > maxLen {
+					t.Errorf("maxLen %d: chunk %d is %d runes, over the limit: %q",
+						maxLen, i, n, shortInput(c))
+				}
+			}
+			if !keepsNonSpaceRunes(in, strings.Join(chunks, "")) {
+				t.Errorf("maxLen %d: content lost across the split of %q", maxLen, shortInput(in))
+			}
+		}
+	}
+}
+
+// TestSplitMessageLongFenceHeaderTerminates covers the same non-termination
+// through the other reopen site. Its entry condition bounds maxLen but not the
+// length of the fence header, and progress needs the chunk to clear the header,
+// so a long header moves the failure window up rather than removing it: a
+// 40-rune header hung for maxLen 24..70.
+func TestSplitMessageLongFenceHeaderTerminates(t *testing.T) {
+	longHeader := "```" + strings.Repeat("L", 40)
+	inputs := []string{
+		longHeader + strings.Repeat("q", 2000),
+		longHeader + "\n" + strings.Repeat("q ", 1000),
+		"```" + strings.Repeat("L", 60) + "\n" + strings.Repeat("w ", 1000),
+		"```" + strings.Repeat("L", 20) + strings.Repeat("z", 1500),
+		longHeader + "\n" + strings.Repeat("word ", 750),
+		"```" + strings.Repeat("語", 40) + strings.Repeat("字", 2000),
+		"```" + strings.Repeat("L", 20) + strings.Repeat("語", 1500),
+		"```🚀" + strings.Repeat("🌍 ", 900),
+	}
+
+	for _, in := range inputs {
+		for maxLen := 24; maxLen <= 90; maxLen++ {
+			chunks := splitWithin(t, in, maxLen, 5*time.Second)
+
+			if len(chunks) == 0 {
+				t.Errorf("maxLen %d: no chunks returned for %q", maxLen, shortInput(in))
+				continue
+			}
+			for i, c := range chunks {
+				if c == "" {
+					t.Errorf("maxLen %d: chunk %d is empty for %q", maxLen, i, shortInput(in))
+				}
+				if n := len([]rune(c)); n > maxLen {
+					t.Errorf("maxLen %d: chunk %d is %d runes, over the limit: %q",
+						maxLen, i, n, shortInput(c))
+				}
+			}
+			if !keepsNonSpaceRunes(in, strings.Join(chunks, "")) {
+				t.Errorf("maxLen %d: content lost across the split of %q", maxLen, shortInput(in))
+			}
+		}
+	}
+}
+
+// TestSplitMessageReopensFenceInEveryChunk pins the property the byte/rune mix
+// in the shrink check broke. A code block that runs past one chunk is closed
+// with an injected "\n```" and re-opened by prepending its header to the tail,
+// so every chunk after the first starts with that header and every chunk before
+// the last ends with the injected fence. The shrink check decides whether to
+// take that branch, and when it measures the tail in bytes against a rune
+// budget it rejects the reopen on almost any multi-byte body: the first chunk
+// still gets its fence, and every later chunk of the same block silently turns
+// into bare text. Both sides of that are non-ASCII here, which is the point.
+func TestSplitMessageReopensFenceInEveryChunk(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		body   string
+		maxLen int
+	}{
+		{"cjk", "```語", strings.Repeat("これは日本語のテキストです。\n", 120), 200},
+		{"cyrillic", "```", strings.Repeat("Привет мир, это тест.\n", 120), 200},
+		{"emoji", "```🚀", strings.Repeat("launch 🔥 done ✅ ok\n", 90), 160},
+		{"accented", "```go", "\n" + strings.Repeat("café naïve résumé — über Größe\n", 120), 200},
+		{"ascii_control", "```go", "\n" + strings.Repeat("fmt.Println(\"hi\")\n", 120), 200},
+	}
+
+	for _, tt := range tests {
+		in := tt.header + tt.body
+		chunks := splitWithin(t, in, tt.maxLen, 5*time.Second)
+		if len(chunks) < 3 {
+			t.Fatalf("%s: expected a multi-chunk block, got %d chunks", tt.name, len(chunks))
+		}
+		// The splitter re-opens with the block's header line: everything from
+		// the opening fence to the end of that line, trimmed. When the body
+		// starts on the fence line itself, that is more than the fence.
+		reopen := strings.TrimSpace(strings.SplitN(in, "\n", 2)[0]) + "\n"
+		for i, c := range chunks {
+			if i > 0 && !strings.HasPrefix(c, reopen) {
+				t.Errorf("%s: chunk %d does not re-open the block with %q: starts %q",
+					tt.name, i, reopen, shortInput(c))
+			}
+			if i < len(chunks)-1 && !strings.HasSuffix(c, "\n```") {
+				t.Errorf("%s: chunk %d does not close the block: ends %q",
+					tt.name, i, shortInput(string([]rune(c)[max(0, len([]rune(c))-12):])))
+			}
+			if n := len([]rune(c)); n > tt.maxLen {
+				t.Errorf("%s: chunk %d is %d runes, over the limit %d", tt.name, i, n, tt.maxLen)
+			}
+		}
+	}
+}
+
+// splitWithin runs SplitMessage under a watchdog so a non-termination
+// regression names the input and maxLen instead of killing the package with a
+// test-timeout panic.
+func splitWithin(t *testing.T, in string, maxLen int, d time.Duration) []string {
+	t.Helper()
+	done := make(chan []string, 1)
+	go func() { done <- SplitMessage(in, maxLen) }()
+	select {
+	case chunks := <-done:
+		return chunks
+	case <-time.After(d):
+		t.Fatalf("SplitMessage(%q, %d) did not return within %v", shortInput(in), maxLen, d)
+		return nil
+	}
+}
+
+func shortInput(s string) string {
+	r := []rune(s)
+	if len(r) > 40 {
+		return string(r[:40]) + "…"
+	}
+	return s
+}
+
+// keepsNonSpaceRunes reports whether every non-whitespace rune of want appears
+// in got in order, allowing for the fence characters the splitter injects.
+func keepsNonSpaceRunes(want, got string) bool {
+	it := []rune(got)
+	pos := 0
+	for _, r := range want {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		found := false
+		for pos < len(it) {
+			c := it[pos]
+			pos++
+			if c == r {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
