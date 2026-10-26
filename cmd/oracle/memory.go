@@ -489,9 +489,12 @@ func readStoreDir(dir string) (map[string]string, error) {
 // the only field in a .jsonl line that ever varies: jsonl_two_messages_exact_bytes
 // pins created_at values chosen so the bytes are reproducible, and mutating at()
 // to stamp time.Now() instead of the caller's value moved exactly one expectation
-// (measured when the corpus was 68 cases; the count is 71 now and the one case is
-// still the one). RFC3339Nano fraction trimming -- .100000000 to .1, no fraction for
-// an exact second -- was therefore pinned nowhere in the fixture whose whole job
+// -- measured before this rule existed, when the mask was a blanket one, which is
+// the hole this function closed. Re-measured at this head against the 78-case
+// corpus: the same mutation now moves 21 of 78, because a scripted instant is
+// recorded byte-exact and a store-stamped one is not. RFC3339Nano fraction
+// trimming -- .100000000 to .1, no fraction for an exact second -- was therefore
+// pinned nowhere in the fixture whose whole job
 // is the file.
 //
 // The rule is the one already used for query results: an instant at or after
@@ -769,9 +772,14 @@ func memoryCases() []fixtureCase {
 		// store still considers recoverable. That is why a refused step records
 		// the files as well as the op.
 		//
-		// The offset is what makes the meta unwritable rather than unreadable. Go
-		// range-checks the zone hour only on the positive side when parsing, so
-		// -24:00 loads, and MarshalJSON then refuses it: "timezone hour outside of
+		// The offset is what makes the meta unwritable rather than unreadable, and
+		// the two checks are not the same one. Parsing range-checks the offset
+		// symmetrically but generously -- the strict RFC 3339 scanner falls through
+		// to the general layout parser, whose test is `hr > 24` / `mm > 60` because
+		// "some people do write offsets of 24 hours or 60 minutes" -- so both
+		// +24:00 and -24:00 load, and only ±25:00 is refused at the door.
+		// MarshalJSON then refuses either sign: appendStrictRFC3339 looks at the
+		// hour it has just printed and errors on `>= 24`, "timezone hour outside of
 		// range [0,23]". A port that validates the offset on the way in refuses a
 		// file the Go store reads, and one that validates it nowhere writes a
 		// stamp it can never read back.
