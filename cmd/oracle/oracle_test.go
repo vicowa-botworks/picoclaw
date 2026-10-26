@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"math"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
@@ -409,9 +412,11 @@ const wantWireCorpusSHA = "bfb5d1c1dfcc057ef827180da0759c0d733a7c61d9408a14b8c36
 
 // TestMemoryCorpusIsByteStable is the same pin the wire seam got, for the seam
 // whose expectations move the most: 66 of 68 cases changed when the clock rule
-// did, and the file the port reads lives in another repository, so nothing here
-// could notice the corpus drifting. Two renders of the whole script set must be
-// identical, and the digest must not move without someone deciding it should.
+// did (measured at the head that introduced the rule, when the corpus was 68
+// cases -- it is 71 now), and the file the port reads lives in another
+// repository, so nothing here could notice the corpus drifting. Two renders of
+// the whole script set must be identical, and the digest must not move without
+// someone deciding it should.
 func TestMemoryCorpusIsByteStable(t *testing.T) {
 	render := func() string {
 		f := emit(provenance{
@@ -435,4 +440,145 @@ func TestMemoryCorpusIsByteStable(t *testing.T) {
 	}
 }
 
-const wantMemoryCorpusSHA = "9a38cea8bdc2d9d5d2836cc006181e046f6e6b7252e750b35b8046d853425fe0"
+const wantMemoryCorpusSHA = "976a911406d1fe910c8aeebb41ba6ef4988341cb4db09c3e3bb56a29545c4831"
+
+// exitPanic is what the stubbed exit throws, so a test can tell "the generator
+// refused the case" from "the generator crashed".
+type exitPanic struct{}
+
+// captureFailf runs fn with failf's exit stubbed, and returns what failf printed
+// and whether it was reached at all.
+//
+// The message is the assertion, not the unwinding. A guard that is deleted does
+// not usually make the case succeed: write_file with the name "a/b" still fails,
+// just later and inside WriteFile with "is a directory". Only the text says which
+// of the two refused, so a test that only checks "it exited" passes with the
+// guard removed -- which is the exact failure mode these guards have.
+func captureFailf(t *testing.T, fn func()) (string, bool) {
+	t.Helper()
+
+	origExit, origErr := exitFunc, os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+
+	refused := false
+	exitFunc = func(int) {
+		refused = true
+		panic(exitPanic{})
+	}
+	os.Stderr = w
+
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				if _, ok := p.(exitPanic); !ok {
+					panic(p)
+				}
+			}
+		}()
+		fn()
+	}()
+
+	os.Stderr, exitFunc = origErr, origExit
+	_ = w.Close()
+	msg, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(msg), refused
+}
+
+// TestWriteFileGuardRefusesNonBareNames pins the harness guard that no fixture
+// can reach: a case whose write_file name is "." or ".." is refused by name, not
+// left to fail inside WriteFile. Restoring the guard to `Base(name) != name ||
+// name == ""` leaves all 71 cases green, which is precisely why this test exists.
+func TestWriteFileGuardRefusesNonBareNames(t *testing.T) {
+	for _, name := range []string{".", "..", "sub/dir.jsonl", "s1/../s2.jsonl", ""} {
+		msg, refused := captureFailf(t, func() {
+			runStoreScript("probe", []storeStep{stepWriteFile(name, "x")}, "")
+		})
+		if !refused || !strings.Contains(msg, "bare file name") {
+			t.Errorf("write_file %q: refused=%v, message %q; want the bare-file-name guard",
+				name, refused, strings.TrimSpace(msg))
+		}
+	}
+	// The other side: a bare name is accepted, or every fixture would have
+	// refused and the guard would look like it works.
+	msg, refused := captureFailf(t, func() {
+		runStoreScript("probe", []storeStep{stepWriteFile("s1.jsonl", "x"), stepList()}, "")
+	})
+	if refused {
+		t.Errorf("write_file with a bare name was refused: %s", strings.TrimSpace(msg))
+	}
+}
+
+// TestAtRefusesAnInstantTheMaskWouldErase pins the second harness guard. A
+// scripted instant at or after process start is erased by the clock mask, so a
+// case that scripts one silently pins <time> instead of the instant it names.
+func TestAtRefusesAnInstantTheMaskWouldErase(t *testing.T) {
+	msg, refused := captureFailf(t, func() {
+		at("user", "hi", time.Now().Unix(), 0)
+	})
+	if !refused || !strings.Contains(msg, "at or after process start") {
+		t.Errorf("at(now): refused=%v, message %q; want the clock guard", refused, strings.TrimSpace(msg))
+	}
+
+	m := at("user", "hi", 1700000000, 123456789)
+	if m.CreatedAt == nil || m.CreatedAt.Unix() != 1700000000 || m.CreatedAt.Nanosecond() != 123456789 {
+		t.Errorf("a scripted past instant was not carried through: %+v", m.CreatedAt)
+	}
+}
+
+// TestFailedQueryRecordsNoResult pins the shape of an expected-failure case: the
+// op that failed contributes no entry to results. Its value would be whatever Go
+// returned beside the error -- a nil slice here -- and that is a convention about
+// Go, not a property of the store, so grading it fails a correct port.
+func TestFailedQueryRecordsNoResult(t *testing.T) {
+	got, ok := runStoreScript("probe", []storeStep{
+		stepAddSimple("s1", "user", "hi"),
+		stepWriteRawMeta("s1", "{\"key\": \"s1\", \"cou"),
+		stepGetHistory("s1"),
+	}, "get_history").(map[string]any)
+	if !ok {
+		t.Fatal("expected-failure script did not return an expectation")
+	}
+	if got["error"] != "get_history" {
+		t.Fatalf("error = %v, want get_history", got["error"])
+	}
+	results, ok := got["results"].([]any)
+	if !ok {
+		t.Fatalf("results is %T, want a list", got["results"])
+	}
+	if len(results) != 0 {
+		t.Errorf("results has %d entries; a failed query must contribute none: %v", len(results), results)
+	}
+	if _, ok := got["files"]; !ok {
+		t.Error("a refusal must still record the directory: files is the assertion")
+	}
+}
+
+// TestSucceededQueriesStillRecord is the other half: appending after the error
+// check must not quietly drop the entries that succeed, including two queries in
+// one script, which is the case shape that motivated results being a list.
+func TestSucceededQueriesStillRecord(t *testing.T) {
+	got, ok := runStoreScript("probe", []storeStep{
+		stepAddSimple("s1", "user", "hi"),
+		stepGetHistory("s1"),
+		stepGetMeta("s1"),
+		stepList(),
+	}, "").(map[string]any)
+	if !ok {
+		t.Fatal("script did not return an expectation")
+	}
+	results := got["results"].([]any)
+	if len(results) != 3 {
+		t.Fatalf("results has %d entries, want one per query: %v", len(results), results)
+	}
+	for i, want := range []string{"get_history", "get_meta", "list_all"} {
+		entry := results[i].(map[string]any)
+		if entry["op"] != want || entry["op_index"] != i+1 {
+			t.Errorf("results[%d] = {op: %v, op_index: %v}, want {op: %s, op_index: %d}",
+				i, entry["op"], entry["op_index"], want, i+1)
+		}
+	}
+}
