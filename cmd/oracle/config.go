@@ -758,5 +758,25 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
 				`"type":"telegram","settings":[{"a":1}]}}}`),
 			cfgLoad("config.json")),
+
+		// The exception that keeps the five refusals above from being over-generalised.
+		// `token` is a SecureString: a **struct**, so "a non-object where a struct
+		// belongs is refused" read off the kind alone would reject this file too -- but
+		// SecureString declares its own UnmarshalJSON (config_struct.go:241) which
+		// decodes a bare string, so Go loads the file and keeps the secret. It is the
+		// only struct reachable through a channel's settings that does not decode from an
+		// object, which is why the rule needs the exception rather than a shape test.
+		//
+		// Measured, and the second half is not what reading the tags suggests: the
+		// emitted settings carry base_url, proxy, use_markdown_v2 and
+		// media_group_delay_ms and **no token at all**. Not `"[NOT_HERE]"`, and not the
+		// secret. Channel.MarshalJSON drops SecureString fields outright (the rule
+		// promoted for #1558), and it does so independently of `omitzero` -- a port that
+		// only applies omitzero sees a non-zero SecureString, keeps it, and writes either
+		// the placeholder or, if it echoes the stored value, every secret in the file.
+		configCase("a_string_in_a_secure_string_channel_setting_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"token":"hunter2"}}}}`),
+			cfgLoad("config.json")),
 	}
 }
