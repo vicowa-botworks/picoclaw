@@ -214,12 +214,13 @@ type fixtureFile struct {
 	count int
 }
 
-// writeAll is the reason render and write are separate. The six files share one
+// writeAll is the reason render and write are separate. Every file shares one
 // source_commit, so a failure on the third must not leave the first two already
 // rewritten at the new commit: a half-regenerated set is exactly what the
 // provenance field exists to prevent. Measured before this existed, a value
 // portable() did not recognize killed the run mid-write and left two fresh files
-// and two stale ones.
+// and two stale ones. (No file count in this comment on purpose: it has gone
+// stale three times as seams were added.)
 func writeAll(files []fixtureFile) {
 	for _, f := range files {
 		if err := os.WriteFile(f.path, f.raw, 0o644); err != nil {
