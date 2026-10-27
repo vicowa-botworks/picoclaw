@@ -413,7 +413,7 @@ const wantWireCorpusSHA = "bfb5d1c1dfcc057ef827180da0759c0d733a7c61d9408a14b8c36
 // TestMemoryCorpusIsByteStable is the same pin the wire seam got, for the seam
 // whose expectations move the most: 66 of 68 cases changed when the clock rule
 // did (measured at the head that introduced the rule, when the corpus was 68
-// cases -- it is 78 now), and the file the port reads lives in another
+// cases -- it is 79 now), and the file the port reads lives in another
 // repository, so nothing here could notice the corpus drifting. Two renders of
 // the whole script set must be identical, and the digest must not move without
 // someone deciding it should.
@@ -440,7 +440,7 @@ func TestMemoryCorpusIsByteStable(t *testing.T) {
 	}
 }
 
-const wantMemoryCorpusSHA = "408dfed81a7bb727f33cb725c4acd54ac591fee541a676ab94e439764a4afb9f"
+const wantMemoryCorpusSHA = "0e78fce312124ff8ff734d11425ec42146050e392dca963dec2775b3d1ac855f"
 
 // exitPanic is what the stubbed exit throws, so a test can tell "the generator
 // refused the case" from "the generator crashed".
