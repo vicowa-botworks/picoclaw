@@ -661,11 +661,38 @@ func configCases() []fixtureCase {
 				`"type":"telegram","settings":{"media_group_delay_ms":1500.0}}}}`),
 			cfgLoad("config.json")),
 
-		// A nil slice is null and an empty one is [], and the channel vocabulary has
-		// both: omitting allow_from is not the same document as writing [].
-		configCase("nil_and_empty_channel_slices_differ",
-			cfgWrite("config.json", `{"version":3,"channel_list":{"a":{"enabled":true,`+
-				`"type":"telegram"},"b":{"enabled":true,"type":"discord","allow_from":[]}}}`),
+		// The sibling of the case above, and the reason that case says anything: the
+		// same field with the same value written without a fraction loads fine. Without
+		// it the refusal is only attributable to the document as a whole -- the field,
+		// the channel type and the fraction are all equally suspected, and a port that
+		// refuses all three numbers for one shared wrong reason still passes.
+		configCase("an_integer_in_an_int_channel_field_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"media_group_delay_ms":1500}}}}`),
+			cfgLoad("config.json")),
+
+		// What a slice in a channel actually does, measured rather than assumed. The
+		// tempting claim -- nil marshals as null and [] as [], so the two are different
+		// documents -- is false here, and false in a way a port would get wrong in the
+		// safe-looking direction: `Channel.AllowFrom` is `json:"allow_from,omitempty"`
+		// (config_channel.go:227), and `omitempty` drops a length-0 slice exactly as it
+		// drops a nil one. So in the loaded value absent, `null` and `[]` are one thing,
+		// and only a non-empty list survives.
+		//
+		// That is a real port trap, not a curiosity: `Option<Vec<String>>` with
+		// `skip_serializing_if = "Option::is_none"` writes `[]` for the empty case, which
+		// is a document Go never writes and which a later load then reads back as one
+		// permitted sender with an empty id.
+		//
+		// Second thing this case pins, and the only reason to keep three channels rather
+		// than one: `channel_list` is a Go map, so it marshals with **sorted** keys and
+		// the file's `a`, `b`, `c` lead the built-in defaults instead of trailing them.
+		// No other case has a file-provided channel sorting ahead of a default.
+		configCase("an_empty_channel_list_is_indistinguishable_from_an_absent_one",
+			cfgWrite("config.json", `{"version":3,"channel_list":{`+
+				`"a":{"enabled":true,"type":"telegram"},`+
+				`"b":{"enabled":true,"type":"telegram","allow_from":[]},`+
+				`"c":{"enabled":true,"type":"telegram","allow_from":["1"]}}}`),
 			cfgLoad("config.json")),
 	}
 }
