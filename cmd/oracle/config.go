@@ -716,27 +716,82 @@ func configCases() []fixtureCase {
 		// tag suggests: a channel the *config* names replaces its default outright,
 		// while a channel only the *security file* names merges into it.
 
-		// A security entry that names a model but carries no `api_keys` clears the
-		// keys the JSON document had. `SecureModelList.UnmarshalYAML` assigns the
-		// entry's keys to the matching model rather than merging, so an entry with
-		// nothing in them is an assignment of nil, not a no-op. A port that skips an
-		// entry with no keys keeps `sk-1` and writes a model the shipped binary has no
-		// credentials for.
-		configCase("security_entry_without_api_keys_against_live_json_keys",
+		// The `web` section is applied, and only a save can show it. Measured: the loaded
+		// value for `web.brave.api_keys: [bk]` is byte-identical to the same config with no
+		// security file at all -- every field under `web` that could carry a key is a
+		// `SecureStrings`, and `SecureStrings.IsZero` reports true for any caller but the
+		// YAML encoder, so `encoding/json` never writes one. What does differ is what gets
+		// written back: with the section the security file comes out `brave:` /
+		// `api_keys:` / `- bk`, without it `brave: {}`. So the save is the only rendering
+		// that can witness this merge, and a load case for it would structurally be unable
+		// to see its own subject.
+		configCase("save_writes_back_a_web_key_from_the_security_file",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A security entry that names a model but carries no `api_keys` clears the keys the
+		// JSON document had: `SecureModelList.UnmarshalYAML` *assigns* the entry's keys to
+		// the matching model rather than merging, so an entry with nothing in them assigns
+		// nil rather than doing nothing.
+		//
+		// This is a save case because the load cannot see it, and it was a load case first.
+		// Measured against a control with no security file at all, the recorded loaded value
+		// is **identical** either way -- `api_keys` is a `SecureStrings`, invisible to
+		// `encoding/json` like every other field in that family -- so the case as originally
+		// written passed with the keys cleared and with the keys intact, and its name
+		// claimed the opposite of what its bytes witnessed. What does differ is the file
+		// written back: `m1:0: {}` with the entry, `m1:0:` / `api_keys:` / `- sk-1` without
+		// it. A port that skips an entry with no keys keeps `sk-1` and writes credentials the
+		// shipped binary would have dropped.
+		configCase("save_clears_keys_for_a_security_entry_without_keys",
 			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
 				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1"]}]}`),
 			cfgWrite(".security.yml", "model_list:\n    m1:0: {}\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A real model field in a security entry is not read either -- the pass copies
+		// `api_keys` and nothing else -- which the load cannot show for the same reason:
+		// `provider` is written back from the JSON document either way. So this compares the
+		// two files a save produces. A port that merges the whole entry writes
+		// `provider: anthropic` into config.json and fails here; a port that only ever
+		// merges keys passes, and passes the case above for the right reason.
+		configCase("save_does_not_copy_a_model_field_from_a_security_entry",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"model":"llama-3","api_keys":["sk-1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n      provider: anthropic\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A nested settings node *fills*, it does not replace. The config says
+		// `streaming.enabled: true`, the security file says `streaming.throttle_seconds: 7`,
+		// and the loaded value carries both. A port that assigns the security node over the
+		// stored one loses `enabled` -- and loses it in the one place a user would notice,
+		// since `streaming` is the section whose explicit `false` Go goes out of its way to
+		// re-inject.
+		configCase("security_channel_settings_fill_a_nested_node",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true}}}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        settings:\n"+
+				"            streaming:\n                throttle_seconds: 7\n"),
 			cfgLoad("config.json")),
 
-		// A real model field in a security entry is not read: `provider` stays
-		// `openrouter`, from the JSON document, and the keys are still cleared. The
-		// recorded value is identical to the case above, which is the point -- the
-		// security entry's only effect is on `api_keys`, so a port that copies other
-		// fields over writes `provider: anthropic` and fails here.
-		configCase("security_entry_carrying_a_real_model_field",
-			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
-				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1"]}]}`),
-			cfgWrite(".security.yml", "model_list:\n    m1:0:\n      provider: anthropic\n"),
+		// A channel only the security file names, under a name that is not a channel type.
+		// Refused -- and refused for the reason the case is named for, which is not what I
+		// predicted: the entry's own `type: telegram` is **ignored**, because
+		// `InitChannelList` infers the type from the map key whenever the channel's is empty
+		// (config_channel.go:738) and the security merge leaves it empty even though `type`
+		// is one of Channel's base fields. So the type is `mychan`, `isValidChannelType`
+		// rejects it, and the load fails. A port that reads `type` out of the security entry
+		// accepts the file; a port that only ever walks the channels it already has never
+		// sees the entry at all and also accepts it. Both are wrong in opposite directions,
+		// and only one refusal message names the key rather than a type.
+		configCaseErr("security_channel_list_entry_with_an_unknown_name_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "channel_list:\n    mychan:\n        enabled: true\n"+
+				"        type: telegram\n"),
 			cfgLoad("config.json")),
 
 		// The config names telegram and gives it one settings key, so the channel
