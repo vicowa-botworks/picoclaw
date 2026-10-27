@@ -99,10 +99,13 @@ type node struct {
 	// It is deliberately a flag rather than a suppression of `json_fields`, because
 	// Channel declares one and its list *is* exactly what goes out -- the type-alias
 	// trick inside MarshalJSON marshals the declaration order. Suppressing on the flag
-	// would throw away the one list the port most needs. The five where the flag means
-	// "the list lies" are named on `ctx.jsonMarshalers`.
+	// would throw away the one list the port most needs.
 	//
-	// The absence of `json_fields` on a node that has this flag is itself a claim:
+	// The flag fires on 49 nodes covering nine types in a real Config. Eight of the
+	// nine lie about their bytes in one of three ways; Channel is the honest one. All
+	// nine are named, with the bytes measured off the real types, on ctx.jsonMarshalers
+	// -- an unlisted name is a claim that the shape is honest, so the list is exhaustive
+	// on purpose. The absence of `json_fields` on a flagged node is itself a claim:
 	// SecureString is a struct with no exported fields, so it has no list, but its
 	// MarshalJSON writes the *string* "[NOT_HERE]" -- 36 positions in a real config.
 	JSONMarshaler bool `json:"json_marshaler,omitempty"`
@@ -196,12 +199,41 @@ type ctx struct {
 	// Go writes a hand-built secrets-only projection.
 	yamlMarshalers map[string]bool
 	// jsonMarshalers is every type in the directory that declares its own
-	// `MarshalJSON()`. Six do, and for five of them the bytes that go out are not the
-	// struct's fields: EvolutionConfig's shadow struct drops two keys, AgentModelConfig
-	// emits a bare string, SkillRegistryConfig marshals a hand-built map (so sorted),
-	// SecureString writes a placeholder string, and Config's aux wrapper hoists `session`
-	// above every promoted field. The sixth, Channel, declares one whose output *is* the
-	// declaration order -- which is why this is a flag and not a suppression.
+	// `MarshalJSON()`. Nine do, covering 49 nodes of a real Config, and for eight of
+	// them the bytes that go out are not the struct's fields. Measured, by what the
+	// lie is:
+	//
+	// A struct that writes a scalar. SecureString (36 nodes) and SecureStrings (5:
+	// model_list[].api_keys and the four web-search api_keys) both write the *string*
+	// "[NOT_HERE]". SecureStrings is a []*SecureString, so a porter reading only the
+	// kind writes `["[NOT_HERE]"]` where Go writes `"[NOT_HERE]"` -- and it writes that
+	// for a populated slice, an empty one and a nil one alike, so no shape distinction
+	// survives the round trip.
+	//
+	// A struct that writes a bare string: AgentModelConfig (2) emits `"m"` for
+	// {Primary:"m"}, not an object.
+	//
+	// A slice that writes an object. SkillsRegistriesConfig (1: tools.skills.registries)
+	// is []*SkillRegistryConfig and writes a name-keyed object with the keys sorted --
+	// {zeta, alpha} marshals to {"alpha":{...},"zeta":{...}} -- `null` when nil but `{}`
+	// when empty and non-nil, and entries that are nil or carry an empty Name are
+	// dropped ({keep, "", nil} emits one member). The name is the key and never a
+	// member. Its element SkillRegistryConfig (1) writes a hand-built map too: `enabled`
+	// and `base_url` always, `auth_token` only when the token is non-empty, plus every
+	// Param key that is not empty, not "param", not "_"-prefixed and does not collide --
+	// so its json_fields list names `name`, which never appears, and cannot name the
+	// user keys that do.
+	//
+	// A scalar that writes stored bytes. RawNode (1: channel_list[].settings) emits the
+	// bytes verbatim -- {"z":1,"a":2} keeps its order, because nothing re-encodes it --
+	// and `null` when empty or nil.
+	//
+	// A struct that shadows itself. EvolutionConfig (1) lists 9 keys and emits at most
+	// 7; Config (1) wraps an aux struct that hoists `session` above every promoted
+	// field, which is why a present `session` is the first key in the file.
+	//
+	// The ninth, Channel (1), declares one whose output *is* the declaration order --
+	// which is why this is a flag and not a suppression.
 	jsonMarshalers map[string]bool
 }
 
@@ -467,6 +499,12 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 	// pointer rule (nil is empty) and not the value-struct rule that keeps `isolation: {}`
 	// in the file: MarshalJSON sets the pointer only when one of the three dimensions,
 	// identity_links or dm_scope is non-empty.
+	//
+	// This runs exactly once per Config node because it sits on the single path that
+	// builds `out`, and that path is also what stores `out` in the cache -- keep the
+	// hoist there. Hoisting from a second site (a cache lookup, a post-pass over the
+	// finished tree) would move `session` twice on a cached node and put it behind
+	// `version`, which is the bug the hoist exists to prevent.
 	if name == "Config" {
 		for i, f := range out.JSONFields {
 			if f.JSON == "session" {
@@ -552,8 +590,12 @@ func cloneNode(n *node) *node {
 	}
 	if n.JSONFields != nil {
 		c.JSONFields = append([]jsonField(nil), n.JSONFields...)
-		c.JSONMarshaler = n.JSONMarshaler
 	}
+	// Outside the JSONFields guard on purpose: `c := *n` already carried the bool, but
+	// reading it inside the guard says the flag only clones on nodes that have a JSON
+	// list, and the flagged nodes that most need it -- SecureString's 36 -- have
+	// `json_fields == nil`.
+	c.JSONMarshaler = n.JSONMarshaler
 	return &c
 }
 
