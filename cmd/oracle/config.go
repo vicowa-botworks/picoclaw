@@ -694,5 +694,69 @@ func configCases() []fixtureCase {
 				`"b":{"enabled":true,"type":"telegram","allow_from":[]},`+
 				`"c":{"enabled":true,"type":"telegram","allow_from":["1"]}}}`),
 			cfgLoad("config.json")),
+
+		// The rest of the type matrix, one field at a time. `a_fractional_number_in_an_
+		// int_channel_field` above pins int-vs-float; these pin that a field's declared
+		// type is checked at all, which is a different rule and one a port can satisfy
+		// for numbers while breaking for everything else. A projection that asks only
+		// "is the target numeric" accepts `"enabled":"true"` and then re-emits a string
+		// in the slot every downstream reader treats as a flag -- and with `save` behind
+		// it, a config Go refused gets written back on the next start.
+		//
+		// A string where the field is a bool. Go: cannot unmarshal string into Go value
+		// of type bool.
+		configCaseErr("a_string_in_a_bool_channel_field", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":`+
+				`{"enabled":"true","type":"telegram"}}}`),
+			cfgLoad("config.json")),
+
+		// A number where the field is a bool. Go has no number-to-bool coercion either,
+		// so `1` is refused, not true. This is the case that separates "checks the
+		// target's type" from "accepts whatever JSON numbers map to", which is the exact
+		// mistake the fractional-number fix is made of, one type over. Measured wording,
+		// from picoclaw's own decoder rather than encoding/json's: `type error at line 1,
+		// column 24 for field "telegram.enabled": expected bool but got number`.
+		configCaseErr("a_number_in_a_bool_channel_field", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":`+
+				`{"enabled":1,"type":"telegram"}}}`),
+			cfgLoad("config.json")),
+
+		// The sibling that makes the two refusals above say something: a string in a
+		// string field, in the same settings object of the same channel type, loads.
+		// Without it the refusals are only attributable to `channel_list.telegram` as a
+		// whole, and a port that refuses every channel entry carrying a string value
+		// anywhere still passes.
+		configCase("a_string_in_a_string_channel_setting_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"base_url":"https://example.test"}}}}`),
+			cfgLoad("config.json")),
+
+		// The same rule one level down, because the nested struct is a separate decode:
+		// `settings.streaming.enabled` is a bool inside StreamingConfig inside
+		// TelegramSettings. A projection that type-checks the channel's own fields and
+		// then hands `settings` to a generic walker lets `"yes"` through.
+		configCaseErr("a_string_in_a_bool_inside_settings", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":"yes"}}}}}`),
+			cfgLoad("config.json")),
+
+		// A scalar where the whole settings object belongs. `settings` is a RawNode, so
+		// nothing rejects these bytes at decode time -- the string is stored verbatim and
+		// the refusal only arrives when InitChannelList decodes it into the typed struct
+		// (config_channel.go:746, wrapped as `channel %q failed to decode settings`). A
+		// port that reads the stored value with `get(field)` on a non-object simply gets
+		// None for every field and emits the fully-shaped *default* settings: a silently
+		// different config, not an error.
+		configCaseErr("a_string_where_a_channel_settings_object_belongs", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":"nope"}}}`),
+			cfgLoad("config.json")),
+
+		// And an array in the same position, because the two shapes fail differently in
+		// a port that tests `is_object()` only after trying to read fields from it.
+		configCaseErr("an_array_where_a_channel_settings_object_belongs", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":[{"a":1}]}}}`),
+			cfgLoad("config.json")),
 	}
 }
