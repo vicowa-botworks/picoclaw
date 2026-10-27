@@ -741,6 +741,18 @@ func configCases() []fixtureCase {
 				"        bogus: 1\n"),
 			cfgLoad("config.json")),
 
+		// The same unknown key, one op further: neither file it could land in comes back
+		// with it. `config.json` is written from the typed struct and `.security.yml` from
+		// the schema, so a key the security file invented is gone from both. This is the
+		// byte-level half of the rule above -- the load case cannot see it either way, and a
+		// port that renders either file straight from its merged document leaks `bogus` into
+		// the user's config.
+		configCase("security_unknown_key_reaches_neither_written_file",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "agents:\n    bogus: 1\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
 		configCase("security_unknown_key_under_a_top_level_struct_is_dropped",
 			cfgWrite("config.json", `{"version":3}`),
 			cfgWrite(".security.yml", "agents:\n    bogus: 1\n"),
