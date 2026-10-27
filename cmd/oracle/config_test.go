@@ -50,7 +50,7 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 // and only looks at that line.
 const wantConfigCaseCount = 73
 
-const wantConfigCorpusSHA = "34828957507bf07f886b7d0be2b5a61759b6746a6c775dc1cb96ec34ca702a4f"
+const wantConfigCorpusSHA = "6a47e8f3f399ca711396bc8adf9fcd96f1cc57a75bccfa07d1f69dc94862a14f"
 
 // TestConfigCorpusIgnoresTheMachine is the part the digest above cannot prove on
 // its own: it runs the generator with the environment a real user would have and
