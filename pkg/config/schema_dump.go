@@ -60,6 +60,24 @@ type node struct {
 	// why .security.yml has no `version` key even though yaml.v3 emits untagged fields
 	// under their lowercased Go names.
 	YAML []yamlField `json:"yaml_fields,omitempty"`
+	// JSONFields is set for kind=struct: the keys encoding/json emits for this struct,
+	// in declaration order, with each one's omit option.
+	//
+	// It exists for the same reason YAML does, one encoder over: a map marshals sorted,
+	// so a port that walks Fields writes the right keys in the wrong order. It matters
+	// most inside a channel's `settings`, because InitChannelList decodes the stored
+	// JSON into the typed struct for the channel's type and the loaded value then
+	// marshals *that* -- TelegramSettings declares base_url and proxy before
+	// use_markdown_v2, so the loaded config emits them first, and a sorted port emits
+	// them last. The list is also what says which fields a settings object has at all:
+	// a field with no omit option is emitted even when its value is the zero value, so
+	// `dingtalk` carries `"client_id": ""` and `slack` carries an empty object rather
+	// than no `settings` key. Neither is visible in a dump of the stored document,
+	// because neither is in it.
+	//
+	// An embedded struct splices its own list in at that position, which is what
+	// encoding/json does. A field tagged json:"-" is absent, as from Fields.
+	JSONFields []jsonField `json:"json_fields,omitempty"`
 	// BaseFields is set on the Channel node only: the JSON keys that belong to Channel
 	// itself rather than to a channel's settings. pkg/config/migration.go decides which
 	// half of a legacy flat channel entry moves inside `settings` by asking this exact
@@ -67,7 +85,7 @@ type node struct {
 	// list that silently disagrees the day someone adds a channel-level field.
 	BaseFields []string `json:"base_fields,omitempty"`
 	// SettingsSchemas is set on the Channel node only: channel type -> the struct its
-	// settings decode into, with that struct's yaml emission list.
+	// settings decode into, with that struct's yaml and json emission lists.
 	SettingsSchemas map[string]*node `json:"settings_schemas,omitempty"`
 	// Marshaler says this type implements yaml.Marshaler, so its own MarshalYAML
 	// decides what is emitted and the generic walk below must not run for it. Four
@@ -95,6 +113,17 @@ type yamlField struct {
 	// web and skills are top-level sections of .security.yml.
 	Inline bool `json:"inline,omitempty"`
 	// Omit is the yaml option: "omitempty" or absent. yaml.v3 has no omitzero.
+	Omit string `json:"omit,omitempty"`
+}
+
+// jsonField is one entry of a struct's JSON emission list. The child node -- kind,
+// element type, nested fields -- is in Fields under the same key; this list carries
+// only what a map cannot: the order, and whether the key survives a zero value.
+type jsonField struct {
+	// JSON is the key encoding/json writes for this field.
+	JSON string `json:"json"`
+	// Omit is "omitzero", "omitempty", or absent. Absent means the key is written even
+	// when the value is zero, which is the case most of a channel's settings fields are.
 	Omit string `json:"omit,omitempty"`
 }
 
@@ -340,6 +369,10 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 				if _, _, _, hidden, _ := tagYAML(field.Tag, strings.TrimPrefix(tn, "*")); !hidden {
 					out.YAML = append(out.YAML, child.YAML...)
 				}
+				// encoding/json inlines it the same way for the JSON document, and
+				// there is no `json:"-"`-equivalent to hide it: the tag was already
+				// checked for "-" above, so reaching here means the field is emitted.
+				out.JSONFields = append(out.JSONFields, child.JSONFields...)
 			}
 			continue
 		}
@@ -361,6 +394,10 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 			child := cloneNode(c.nodeFor(field.Type, depth+1))
 			child.Omit = omitOption(field.Tag)
 			out.Fields[fieldName] = child
+			out.JSONFields = append(out.JSONFields, jsonField{
+				JSON: fieldName,
+				Omit: child.Omit,
+			})
 			yn, yInline, yOmit, yHidden, yUntagged := tagYAML(field.Tag, ident.Name)
 			if !yHidden {
 				out.YAML = append(out.YAML, yamlField{
@@ -430,6 +467,17 @@ func strip(expr ast.Expr) ast.Expr {
 // only ever read after the walk finishes.
 func cloneNode(n *node) *node {
 	c := *n
+	// The emission lists are copied rather than shared. nodeFor hands back one cached
+	// node per named type, so a shallow clone plus an append writes into the cached
+	// node's backing array and every later reader of that type sees the extra entry --
+	// the same class of bug as annotating Omit on a shared node, which used to make two
+	// fields of one struct overwrite each other's option.
+	if n.YAML != nil {
+		c.YAML = append([]yamlField(nil), n.YAML...)
+	}
+	if n.JSONFields != nil {
+		c.JSONFields = append([]jsonField(nil), n.JSONFields...)
+	}
 	return &c
 }
 
