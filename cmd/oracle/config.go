@@ -716,6 +716,57 @@ func configCases() []fixtureCase {
 		// tag suggests: a channel the *config* names replaces its default outright,
 		// while a channel only the *security file* names merges into it.
 
+		// A `.security.yml` is a secrets file, and Go enforces that with tags rather than
+		// with a filter: every field that is not a credential is `yaml:"-"` on the types the
+		// file can reach. `Channel`'s whole base (`config_channel.go:224-231`), a search
+		// provider's `max_results` (`config.go:896`), and everything else -- so the file can
+		// name a key the target type has and still set nothing. Measured: `max_results: 9`
+		// under `web.brave` leaves the loaded value at the default 5, identical to no security
+		// file. A port that merges whatever the file says sets 9 and produces a config the
+		// shipped binary cannot produce from that file.
+		configCase("security_cannot_set_a_field_tagged_yaml_dash",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        max_results: 9\n"),
+			cfgLoad("config.json")),
+
+		// A key the target type does not have at all is dropped, not stored. The security
+		// file is decoded with plain `yaml.Unmarshal` -- not `UnmarshalStrict`, which is what
+		// lets Go read the `web` and `skills` sections at all -- so an unknown key is silent
+		// rather than a refusal, and it must not reach the document either. Pinned at two
+		// depths because the merge walks each one separately: a provider under `web`, and a
+		// top-level struct.
+		configCase("security_unknown_key_under_a_provider_is_dropped",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"+
+				"        bogus: 1\n"),
+			cfgLoad("config.json")),
+
+		configCase("security_unknown_key_under_a_top_level_struct_is_dropped",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "agents:\n    bogus: 1\n"),
+			cfgLoad("config.json")),
+
+		// A settings scalar the config already set is *replaced*, not filled. This is the
+		// one shape that reaches the replace arm of the security merge: the key has to be
+		// present on both sides, because a key only the file has is appended and never
+		// touches that code. Measured 1234, from the file, over the config's 500.
+		configCase("security_settings_replace_a_scalar_the_config_set",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"media_group_delay_ms":500}}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        settings:\n"+
+				"            media_group_delay_ms: 1234\n"),
+			cfgLoad("config.json")),
+
+		// A model entry written with an empty optional field does not keep it. `proxy` and
+		// `api_base` are `omitempty`, so "" is dropped on the way out -- which is a different
+		// document from the one the file had, and the port has to agree about which of the
+		// model's fields are always written (`model_name`, `model`, `provider`) and which are
+		// conditional. Measured: `[{"model_name":"m1","provider":"p","model":"q"}]`.
+		configCase("model_entry_drops_its_empty_optional_fields",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"q","proxy":"","api_base":""}]}`),
+			cfgLoad("config.json")),
+
 		// The `web` section is applied, and only a save can show it. Measured: the loaded
 		// value for `web.brave.api_keys: [bk]` is byte-identical to the same config with no
 		// security file at all -- every field under `web` that could carry a key is a
