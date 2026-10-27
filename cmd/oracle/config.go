@@ -498,6 +498,81 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "model_list:\n    - model_name: m1\n"),
 			cfgLoad("config.json")),
 
+		// ---------------------------------------------------------------- security --
+		//
+		// What the security file can say is narrower than its struct suggests, and
+		// narrower per section: inside `web` only `api_keys` is readable (Brave,
+		// Tavily, Kagi, ... all tag `enabled`, `base_url` and `max_results`
+		// `yaml:"-"`), inside a skills registry only `auth_token` plus whatever keys
+		// land in Param, and inside `model_list` nothing at all. The file exists to
+		// hold secrets, so every non-secret field of these types is JSON-only -- and a
+		// port that reads `enabled` out of the security file is inventing a key the
+		// shipped binary ignores.
+		//
+		// `skills` additionally gets a second, legacy pass (applyLegacySkillsSecurity-
+		// Config, security.go:96) that the plain unmarshal does not cover: a bare
+		// `skills: {github: {...}}` also *creates* a registry entry.
+		//
+		// The web section is NOT pinned here, and cannot be through a load. Its only
+		// readable key is `api_keys`, a SecureStrings, and SecureStrings.IsZero
+		// (config_struct.go:114) returns true whenever the caller is not the YAML
+		// encoder -- deliberately, on the comment's own words, "to prevent marshal
+		// this field". So under `encoding/json` every `omitzero` secure field is
+		// omitted whatever it holds, and a security file's `web.brave.api_keys` leaves
+		// the loaded value byte-identical to one with no security file at all. That
+		// was measured, not read: the candidate case for it recorded the same value
+		// with and without the section, so it is not in the corpus. The merge is
+		// observable only in what `save` writes back, so it belongs with the save
+		// cases.
+
+		// A legacy `skills.github.token` does two things, and only the second is what
+		// the plain unmarshal does. It reaches tools.skills.github.token -- which then
+		// marshals as *nothing*, for the IsZero reason above -- and the legacy pass
+		// copies the same value into the `github` registry's Param, where
+		// SkillRegistryConfig.MarshalJSON (config_struct.go:503) re-emits it
+		// **in plaintext** beside a masked `auth_token: "[NOT_HERE]"`. So one secret
+		// appears twice in the loaded value, once hidden and once not, and the
+		// difference is that MarshalJSON builds the registry object by hand and cannot
+		// see the omit options. A port that reads the section once leaves the registry
+		// list untouched and every skill install then reports no credentials; a port
+		// that masks Param leaks nothing but disagrees with Go byte for byte.
+		configCase("security_legacy_github_token_becomes_a_registry",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// The modern path, `skills.registries.<name>.auth_token`, is handled by the
+		// plain unmarshal alone and reaches the registry the defaults already carry.
+		// Renaming `registries` to a registry name moves the token to a different
+		// entry, which is what makes this case more than a restatement of the one
+		// above: the two spellings are two different code paths, and the file decides
+		// which by one key.
+		//
+		// What this case does *not* pin is the legacy pass's explicit `continue` on the
+		// name `registries` (security.go:104). Measured, dropping that skip changes
+		// nothing: a `registries` entry decoded as a registry has no auth_token of its
+		// own, so the token rule below skips it anyway. The skip is defence in depth
+		// in Go and unobservable from the corpus, so it is not claimed here.
+		configCase("security_registries_path_sets_the_registry_token",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        clawhub:\n"+
+				"            auth_token: tok_claw\n"),
+			cfgLoad("config.json")),
+
+		// A legacy registry entry with no token is skipped outright (the `continue` at
+		// security.go:159), so it never reaches the registry list. The entry carries a
+		// `base_url` rather than being empty so the skip is actually visible: an
+		// unknown key lands in Param and Param is re-emitted by MarshalJSON, so a port
+		// without the skip produces a `other` registry showing that base_url, and a
+		// port with it shows nothing. A name that is not `github` also cannot borrow
+		// the github token to qualify -- the github entry in the same file is what
+		// makes that distinction real rather than vacuous.
+		configCase("security_legacy_registry_without_a_token_is_skipped",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    other:\n        base_url: https://x\n"+
+				"    github:\n        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
 		// ---------------------------------------------------------------- the pair --
 		//
 		// .security.yml is the yaml-tagged half and the JSON document is the rest;
