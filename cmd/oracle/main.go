@@ -104,6 +104,17 @@ func main() {
 			memoryStoreNote,
 			memoryCases(),
 			func(c fixtureCase) any { return runStoreScript(c.Name, c.script, c.expectErrOp) }),
+
+		// The other stored format. SaveConfig writes a pair of files -- the JSON
+		// document and .security.yml beside it -- and LoadConfig runs a versioned
+		// migration chain on the way in, so the artifact is again the directory.
+		emit(provenance, filepath.Join(*out, "config_load_save.json"),
+			"pkg/config.LoadConfig + SaveConfig + DefaultConfig",
+			configNote,
+			configCases(),
+			func(c fixtureCase) any {
+				return runConfigScript(c.Name, c.configScript, c.expectErrIdx)
+			}),
 	})
 }
 
@@ -115,12 +126,14 @@ type fixtureCase struct {
 	Input    map[string]any `json:"input"`
 	Expected any            `json:"expected"`
 
-	message     protocoltypes.Message
-	defs        []protocoltypes.ToolDefinition
-	params      any
-	wire        any
-	script      []storeStep
-	expectErrOp string
+	message      protocoltypes.Message
+	defs         []protocoltypes.ToolDefinition
+	params       any
+	wire         any
+	script       []storeStep
+	configScript []configStep
+	expectErrOp  string
+	expectErrIdx int
 }
 
 type fixture struct {
