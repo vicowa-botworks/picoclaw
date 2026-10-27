@@ -440,7 +440,7 @@ func TestMemoryCorpusIsByteStable(t *testing.T) {
 	}
 }
 
-const wantMemoryCorpusSHA = "0e78fce312124ff8ff734d11425ec42146050e392dca963dec2775b3d1ac855f"
+const wantMemoryCorpusSHA = "d7b7c3cbbdd37ca9b07507c5f76d80086bb22c1958451ca5b0d1aa5d74574b58"
 
 // exitPanic is what the stubbed exit throws, so a test can tell "the generator
 // refused the case" from "the generator crashed".

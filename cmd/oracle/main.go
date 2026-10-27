@@ -214,7 +214,7 @@ type fixtureFile struct {
 	count int
 }
 
-// writeAll is the reason render and write are separate. The five files share one
+// writeAll is the reason render and write are separate. The six files share one
 // source_commit, so a failure on the third must not leave the first two already
 // rewritten at the new commit: a half-regenerated set is exactly what the
 // provenance field exists to prevent. Measured before this existed, a value

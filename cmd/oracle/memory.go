@@ -141,6 +141,18 @@ func (s storeStep) describe() map[string]any {
 			out["scope"] = s.scope
 		}
 		out["aliases"] = describeStrings(s.aliases)
+	case "promote_alias":
+		out["key"] = s.key
+		if s.scope == "" {
+			out["scope"] = nil
+		} else {
+			out["scope"] = s.scope
+		}
+		out["aliases"] = describeStrings(s.aliases)
+	case "block_meta":
+		// Records no content: the point is that a directory now occupies the
+		// path writeMeta wants, and a directory has no bytes to pin.
+		out["key"] = s.key
 	case "write_raw", "write_raw_meta":
 		out["key"] = s.key
 		out["content"] = s.text
@@ -192,6 +204,22 @@ func stepSetSummary(key, summary string) storeStep {
 
 func stepUpsertMeta(key, scope string, aliases []string) storeStep {
 	return storeStep{op: "upsert_meta", key: key, scope: scope, aliases: aliases}
+}
+
+// stepPromoteAlias calls PromoteAliasHistory, which moves an alias session's
+// history onto an empty canonical session. Its bool result is recorded as a
+// query value: "did not promote" and "errored" are different expectations, and
+// the directory alone cannot always tell them apart.
+func stepPromoteAlias(key, scope string, aliases []string) storeStep {
+	return storeStep{op: "promote_alias", key: key, scope: scope, aliases: aliases}
+}
+
+// stepBlockMeta puts a directory where the session's .meta.json belongs, so the
+// next writeMeta refuses. This is how a half-succeeded op is simulated: the
+// store has already rewritten the .jsonl by then, so what the directory looks
+// like afterwards is the whole assertion.
+func stepBlockMeta(key string) storeStep {
+	return storeStep{op: "block_meta", key: key}
 }
 
 // stepWriteRaw replaces the session's .jsonl with exact bytes, bypassing the
@@ -298,6 +326,20 @@ func runStoreScript(name string, steps []storeStep, wantErrOp string) any {
 				scope = json.RawMessage(s.scope)
 			}
 			err = store.UpsertSessionMeta(ctx, s.key, scope, s.aliases)
+		case "promote_alias":
+			var scope json.RawMessage
+			if s.scope != "" {
+				scope = json.RawMessage(s.scope)
+			}
+			var promoted bool
+			promoted, err = store.PromoteAliasHistory(ctx, s.key, scope, s.aliases)
+			queryValue, queryIsQuery = promoted, true
+		case "block_meta":
+			var stem string
+			stem, err = stemFor(ctx, store, dir, s.key, stems)
+			if err == nil {
+				err = os.Mkdir(filepath.Join(dir, stem+".meta.json"), 0o755)
+			}
 		case "write_file":
 			// No store involvement by design: the file is what the script says
 			// it is, and nothing is created alongside it.
@@ -1079,6 +1121,128 @@ func memoryCases() []fixtureCase {
 		memoryCase("set_history_filters_transient_thoughts",
 			stepSetHistory("s1", transientThought(), at("user", "kept", 1700000000, 0)),
 			stepGetHistory("s1"),
+			stepGetMeta("s1")),
+		// PromoteAliasHistory is the only op that moves a history between two
+		// session keys, and until now the corpus had no way to reach it: the
+		// step DSL could write an alias's files but never call the method, so a
+		// green replay said nothing about it. The nine cases below are the whole
+		// branch table.
+		//
+		// One branch is deliberately missing. The rollback in
+		// promoteAliasHistoryLocked -- restoreRawJSONL after writeMeta fails --
+		// is not reachable through the public API: every way of making the meta
+		// write refuse (a directory at the .meta.json path, an over-long key)
+		// makes the readMeta of that same path refuse first, and the read happens
+		// before anything is written. So the rollback is fidelity-only in the
+		// Rust port and cannot be pinned here.
+		memoryCase("promote_alias_moves_the_alias_history",
+			stepAddSimple("a1", "user", "from alias"),
+			stepAddSimple("a1", "assistant", "reply"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1"),
+			stepGetHistory("s1"),
+			stepList()),
+		// The guard that makes promotion idempotent: a canonical session with a
+		// summary or any visible message keeps its own history. The alias file
+		// must be left exactly as it was, so the case queries both keys.
+		memoryCase("promote_alias_refused_when_canonical_has_content",
+			stepAddSimple("a1", "user", "from alias"),
+			stepAddSimple("s1", "user", "mine"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1"),
+			stepGetHistory("s1"),
+			stepGetHistory("a1")),
+		// A summary counts as visible content even with no messages at all, so a
+		// canonical session that was only ever summarised still refuses.
+		memoryCase("promote_alias_refused_when_canonical_has_only_a_summary",
+			stepAddSimple("a1", "user", "from alias"),
+			stepSetSummary("s1", "already summarised"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1")),
+		// Nothing to take: the alias has no files, so readMeta hands back a zero
+		// meta and readMessages an empty slice. The canonical session is seeded
+		// with an empty history file so the assertion is "refused and left the
+		// file alone" rather than the weaker "nothing was created" -- with no
+		// canonical at all, an empty directory would also be satisfied by a port
+		// that refused before it ever looked at the alias.
+		memoryCase("promote_alias_refused_when_alias_has_nothing",
+			stepWriteFile("s1.jsonl", ""),
+			stepPromoteAlias("s1", "", []string{"ghost"}),
+			stepList()),
+		// The mirror of the case above: an alias with a summary and no messages is
+		// enough to promote, and count is then 0 against a summary that is not
+		// empty. A port that treats "nothing to move" as "no work" skips it.
+		memoryCase("promote_alias_carries_only_the_alias_summary",
+			stepSetSummary("a1", "alias summary"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1"),
+			stepGetHistory("s1")),
+		// The canonical session need not exist at all: readMeta hands back a zero
+		// meta with only Key set, so created_at is stamped and the .jsonl is
+		// created by the rewrite.
+		memoryCase("promote_alias_creates_the_canonical_session",
+			stepAddSimple("a1", "user", "from alias"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1"),
+			stepList()),
+		// meta.Scope is a json.RawMessage that MarshalIndent re-indents and
+		// re-escapes to the enclosing document, so the promoted scope must arrive
+		// with four-space members and \u003c escapes -- the same rule the meta
+		// writer already pins, seen through the one op that sets scope without
+		// UpsertSessionMeta.
+		memoryCase("promote_alias_reindents_the_scope_like_marshaljson",
+			stepAddSimple("a1", "user", "from alias"),
+			stepPromoteAlias("s1", `{"q":"<b> & \"x\""}`, []string{"a1"}),
+			stepGetMeta("s1")),
+		// Promotion is the second and last caller of normalizeAliases, and unlike
+		// the meta writer it runs it over the *argument*, not the stored list:
+		// blanks and the canonical key are dropped, duplicates collapse, order
+		// survives. A port that stores the list verbatim here produces an alias set
+		// the Go store never writes.
+		memoryCase("promote_alias_normalizes_the_alias_list",
+			stepAddSimple("a1", "user", "from alias"),
+			stepPromoteAlias("s1", "", []string{"a1", "a1", "", "   ", "s1", "a2"}),
+			stepGetMeta("s1")),
+		// The loop returns on the first alias that promotes, so a canonical session
+		// inherits exactly one alias's history -- the first one with content -- and
+		// the rest are left untouched.
+		memoryCase("promote_alias_first_alias_with_content_wins",
+			stepAddSimple("a1", "user", "one"),
+			stepAddSimple("a2", "user", "two"),
+			stepPromoteAlias("s1", "", []string{"a1", "a2"}),
+			stepGetHistory("s1"),
+			stepGetHistory("a2")),
+		// A blank key refuses before any alias is considered, so nothing is
+		// created. Recorded because the refusal is silent: (false, nil), the same
+		// value as "nothing to promote", and only the directory separates them.
+		memoryCase("promote_alias_refused_on_a_blank_key",
+			stepAddSimple("a1", "user", "from alias"),
+			stepPromoteAlias("", "", []string{"a1"}),
+			stepList()),
+		// The third member of the IsZero family, and the one the mutation run
+		// found missing. A canonical session can carry metadata with a created_at
+		// and still have nothing visible -- a summarised-then-truncated session,
+		// or one whose .jsonl was lost -- and promotion must stamp updated_at
+		// without touching created_at. The timestamp is scripted rather than
+		// store-written on purpose: anything at or after process start is masked,
+		// and a masked value cannot tell "preserved" from "stamped now".
+		//
+		// Two faults the mutation run reported as indistinguishable are equivalent
+		// here rather than uncovered, and it is worth saying why so nobody hunts
+		// for the missing case. Storing the alias list verbatim instead of calling
+		// normalizeAliases again changes nothing, because PromoteAliasHistory
+		// normalizes the argument before the loop and the function is idempotent.
+		// Assigning the summary unconditionally instead of only when non-blank
+		// changes nothing either, because a canonical session with a summary is
+		// refused before the assignment is reached.
+		memoryCase("promote_alias_keeps_a_hand_written_created_at",
+			stepWriteFile("s1.jsonl", ""),
+			stepWriteFile("s1.meta.json",
+				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 0,\n  \"count\": 0,\n"+
+					"  \"created_at\": \"2020-01-02T03:04:05Z\",\n"+
+					"  \"updated_at\": \"2020-01-02T03:04:05Z\"\n}"),
+			stepAddSimple("a1", "user", "from alias"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
 			stepGetMeta("s1")),
 		memoryCase("set_history_stamps_missing_timestamps",
 			stepSetHistory("s1", protocoltypes.Message{Role: "user", Content: "x"}),
