@@ -33,8 +33,8 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 	if second := render(); first != second {
 		t.Fatal("the config corpus is not reproducible")
 	}
-	if n := len(configCases()); n != 25 {
-		t.Errorf("config seam has %d cases, want 25", n)
+	if n := len(configCases()); n != 34 {
+		t.Errorf("config seam has %d cases, want 34", n)
 	}
 	sum := sha256.Sum256([]byte(first))
 	if got := hex.EncodeToString(sum[:]); got != wantConfigCorpusSHA {
@@ -44,7 +44,7 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 	}
 }
 
-const wantConfigCorpusSHA = "138c3a522b93bc8645d82ea68700bda907464a125c71625aa94fb9ae04986d19"
+const wantConfigCorpusSHA = "7490e184c6f445557fb68a47e10f27400a4dc8593b161ba3b4618db7edd1a9f4"
 
 // TestConfigCorpusIgnoresTheMachine is the part the digest above cannot prove on
 // its own: it runs the generator with the environment a real user would have and
