@@ -724,6 +724,38 @@ func configCases() []fixtureCase {
 		// under `web.brave` leaves the loaded value at the default 5, identical to no security
 		// file. A port that merges whatever the file says sets 9 and produces a config the
 		// shipped binary cannot produce from that file.
+		// A legacy `skills` value that is not a mapping is a refusal, not a no-op. Go's
+		// yaml decode targets the typed `SkillsToolsConfig`, so every non-mapping shape is
+		// an unmarshal error out of `loadSecurityConfig` and the whole load fails. The port
+		// currently loads these, which is the divergence recorded in
+		// `rusty-crab/docs/DIVERGENCES.md`; one case per shape is what closes it, because a
+		// port that only handles the scalar still accepts the sequence.
+		configCaseErr("security_skills_scalar_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills: hello\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("security_skills_sequence_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    - github\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("security_skills_number_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills: 7\n"),
+			cfgLoad("config.json")),
+
+		// `null` is the exception, and the reason the three refusals above need their own
+		// cases rather than one "not a mapping" case: yaml.v3 unmarshals a null into the
+		// zero value of the typed target without complaint, so the load succeeds and the
+		// config is unchanged. A port that refuses "not an object" would reject a file Go
+		// accepts -- which is the same class of bug as the refusals above, pointed the other
+		// way.
+		configCase("security_skills_null_loads_unchanged",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills: null\n"),
+			cfgLoad("config.json")),
+
 		configCase("security_cannot_set_a_field_tagged_yaml_dash",
 			cfgWrite("config.json", `{"version":3}`),
 			cfgWrite(".security.yml", "web:\n    brave:\n        max_results: 9\n"),
