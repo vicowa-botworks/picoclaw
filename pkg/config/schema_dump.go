@@ -4,9 +4,12 @@
 // reflection, so the Rust port can refuse the same keys without a reflect
 // package.
 //
-// Run with:
+// Run with a package directory and a root struct, which is what the port needs today:
 //
-//	go run pkg/config/schema_dump.go > /tmp/schema.json
+//	go run -tags goolm,stdjson pkg/config/schema_dump.go pkg/config Config > schema.json
+//
+// The tags are the ones the package builds with; without them the goolm build variant
+// changes which files parse and the dump silently describes a different package.
 //
 // It is `//go:build ignore` on purpose: it is a maintenance tool, not part of the
 // package or the test suite, and it must not be compiled into a release binary.
@@ -42,6 +45,57 @@ type node struct {
 	// key at all. Without this the port has to guess, and a wrong guess writes a key
 	// Go leaves out.
 	Omit string `json:"omit,omitempty"`
+	// YAML is set for kind=struct: the fields yaml.v3 would emit for this struct, in
+	// declaration order, which is the order they appear in .security.yml.
+	//
+	// It is a list and Fields is a map on purpose. The validator only ever asks "is
+	// this key known here", which a map answers; the security writer has to reproduce
+	// a *byte sequence*, and a map marshals sorted. Config's declaration order is
+	// channel_list, model_list, then the inlined Tools' own web and skills -- which is
+	// not sorted order (web and skills would land after session, isolation, …), so a
+	// port driven off the map writes a file with the right content in the wrong order.
+	//
+	// A field carrying yaml:"-" is absent from this list entirely. That is how the
+	// whole file stays small: Config marks every non-secret field yaml:"-", which is
+	// why .security.yml has no `version` key even though yaml.v3 emits untagged fields
+	// under their lowercased Go names.
+	YAML []yamlField `json:"yaml_fields,omitempty"`
+	// BaseFields is set on the Channel node only: the JSON keys that belong to Channel
+	// itself rather than to a channel's settings. pkg/config/migration.go decides which
+	// half of a legacy flat channel entry moves inside `settings` by asking this exact
+	// Go map, so the port has to have the same list -- and a list copied into Rust is a
+	// list that silently disagrees the day someone adds a channel-level field.
+	BaseFields []string `json:"base_fields,omitempty"`
+	// SettingsSchemas is set on the Channel node only: channel type -> the struct its
+	// settings decode into, with that struct's yaml emission list.
+	SettingsSchemas map[string]*node `json:"settings_schemas,omitempty"`
+	// Marshaler says this type implements yaml.Marshaler, so its own MarshalYAML
+	// decides what is emitted and the generic walk below must not run for it. Four
+	// types in pkg/config do: SecureModelList, Channel, SkillRegistryConfig and
+	// SkillsRegistriesConfig -- each of which emits a hand-built "only the secrets"
+	// projection rather than the struct's fields.
+	Marshaler bool `json:"marshaler,omitempty"`
+}
+
+// yamlField is one entry of a struct's yaml emission list.
+type yamlField struct {
+	// JSON is the key this field holds in the JSON document, which is the document
+	// the writer walks. It is not always the yaml key: the two agree today, but a
+	// field tagged `json:"a" yaml:"b"` would make them differ, and a writer that
+	// assumed they were the same would read the right value and label it wrong.
+	JSON string `json:"json"`
+	// Name is the key yaml.v3 writes: the yaml tag's name, or the lowercased Go field
+	// name when the field carries no yaml tag at all.
+	Name string `json:"name"`
+	// Untagged marks the second case, so the port can tell "tagged with this name"
+	// from "no tag, so yaml.v3 lowercased it".
+	Untagged bool `json:"untagged,omitempty"`
+	// Inline is `yaml:",inline"`: the field's own children are emitted at this level
+	// and the field itself never appears. Tools carries it, which is the only reason
+	// web and skills are top-level sections of .security.yml.
+	Inline bool `json:"inline,omitempty"`
+	// Omit is the yaml option: "omitempty" or absent. yaml.v3 has no omitzero.
+	Omit string `json:"omit,omitempty"`
 }
 
 // omitOption reads the encoding option out of a json tag: the part after the name.
@@ -73,21 +127,77 @@ type ctx struct {
 	// class of hole this dump exists to close.
 	aliases map[string]ast.Expr
 	named   map[string]bool
+	// baseFields is `var BaseFieldNames` from config_channel.go, read off the literal.
+	baseFields []string
+	// settingsTypes is `var channelSettingsFactory`: channel type -> the name of the
+	// Settings struct its settings block decodes into. InitChannelList decodes every
+	// channel into that struct and Channel.MarshalYAML emits it, so the .security.yml
+	// writer cannot decide what a channel contributes without it.
+	settingsTypes map[string]string
+	// consts resolves the factory's keys, which are named constants (ChannelTelegram)
+	// rather than string literals.
+	consts map[string]string
 	// cache stops a recursive type from being walked twice, and makes a cycle
 	// terminate: a self-referential struct gets a scalar placeholder the second
 	// time, which is what reflect would report as the same shape anyway.
 	cache map[string]*node
+	// yamlMarshalers is every type in the directory that declares its own
+	// `MarshalYAML()`. The security writer has to know, because for those types the
+	// emitted node is whatever that method returns -- not the struct's fields -- and
+	// running the generic walk instead produces a file with the struct's shape where
+	// Go writes a hand-built secrets-only projection.
+	yamlMarshalers map[string]bool
+}
+
+// tagYAML reads a struct tag's yaml part.
+//
+// Returns the emission key, whether the field is inlined, its omit option, and
+// whether the field is hidden. `yaml:"-"` hides; no yaml key at all means yaml.v3
+// lowercases the Go field name, which is a third state and is reported as untagged
+// rather than folded into either of the other two.
+func tagYAML(tag *ast.BasicLit, goName string) (name string, inline bool, omit string, hidden, untagged bool) {
+	if tag == nil {
+		return strings.ToLower(goName), false, "", false, true
+	}
+	v, err := strconv.Unquote(tag.Value)
+	if err != nil {
+		return strings.ToLower(goName), false, "", false, true
+	}
+	y, ok := reflect.StructTag(v).Lookup("yaml")
+	if !ok {
+		return strings.ToLower(goName), false, "", false, true
+	}
+	parts := strings.Split(y, ",")
+	if parts[0] == "-" {
+		return "", false, "", true, false
+	}
+	for _, opt := range parts[1:] {
+		switch opt {
+		case "inline":
+			inline = true
+		case "omitempty":
+			omit = "omitempty"
+		}
+	}
+	name = parts[0]
+	if name == "" {
+		name = strings.ToLower(goName)
+	}
+	return name, inline, omit, false, false
 }
 
 func main() {
 	dir := os.Args[1]
 	fset := token.NewFileSet()
 	c := &ctx{
-		fset:    fset,
-		structs: map[string]*ast.StructType{},
-		aliases: map[string]ast.Expr{},
-		named:   map[string]bool{},
-		cache:   map[string]*node{},
+		fset:           fset,
+		structs:        map[string]*ast.StructType{},
+		aliases:        map[string]ast.Expr{},
+		named:          map[string]bool{},
+		consts:         map[string]string{},
+		settingsTypes:  map[string]string{},
+		cache:          map[string]*node{},
+		yamlMarshalers: map[string]bool{},
 	}
 
 	files, err := os.ReadDir(dir)
@@ -105,6 +215,54 @@ func main() {
 			os.Exit(1)
 		}
 		for _, decl := range f.Decls {
+			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.CONST {
+				for _, spec := range gen.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, n := range vs.Names {
+						if i >= len(vs.Values) {
+							continue
+						}
+						if bl, ok := vs.Values[i].(*ast.BasicLit); ok && bl.Kind == token.STRING {
+							if v, err := strconv.Unquote(bl.Value); err == nil {
+								c.consts[n.Name] = v
+							}
+						}
+					}
+				}
+			}
+			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.VAR {
+				for _, spec := range gen.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || len(vs.Names) == 0 || vs.Names[0].Name != "BaseFieldNames" {
+						continue
+					}
+					collectKeys(vs.Values[0], &c.baseFields)
+				}
+				for _, spec := range gen.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || len(vs.Names) == 0 || vs.Names[0].Name != "channelSettingsFactory" {
+						continue
+					}
+					lit, ok := vs.Values[0].(*ast.CompositeLit)
+					if !ok {
+						continue
+					}
+					for _, elt := range lit.Elts {
+						kv, ok := elt.(*ast.KeyValueExpr)
+						if !ok {
+							continue
+						}
+						c.settingsTypes[constName(kv.Key, c.consts)] = structOf(kv.Value)
+					}
+				}
+			}
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "MarshalYAML" && fn.Recv != nil {
+				c.yamlMarshalers[receiverName(fn.Recv)] = true
+				continue
+			}
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.TYPE {
 				continue
@@ -143,7 +301,21 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 	if cached, ok := c.cache[name]; ok && depth > 0 {
 		return cached
 	}
-	out := &node{Kind: "struct", Fields: map[string]*node{}, Name: name}
+	out := &node{Kind: "struct", Fields: map[string]*node{}, Name: name, Marshaler: c.yamlMarshalers[name]}
+	if name == "Channel" {
+		out.BaseFields = c.baseFields
+		// Each channel type's settings struct, walked with its own yaml table. This is
+		// the only place the security writer learns that `telegram` answers to
+		// TelegramSettings -- the field's own type is RawNode, so nothing in the type
+		// graph says it.
+		out.SettingsSchemas = map[string]*node{}
+		for chanType, settingsName := range c.settingsTypes {
+			if settingsName == "" || !c.named[settingsName] {
+				continue
+			}
+			out.SettingsSchemas[chanType] = c.nodeFor(ast.NewIdent(settingsName), depth)
+		}
+	}
 	if depth > 0 {
 		c.cache[name] = out
 	}
@@ -163,6 +335,11 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 				for k, v := range child.Fields {
 					out.Fields[k] = v
 				}
+				// yaml.v3 inlines an untagged anonymous struct the same way, so its
+				// emission list splices in here -- unless the field is hidden.
+				if _, _, _, hidden, _ := tagYAML(field.Tag, strings.TrimPrefix(tn, "*")); !hidden {
+					out.YAML = append(out.YAML, child.YAML...)
+				}
 			}
 			continue
 		}
@@ -178,9 +355,22 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 			if fieldName == "" {
 				fieldName = ident.Name
 			}
-			child := c.nodeFor(field.Type, depth+1)
+			// Cloned before it is annotated: nodeFor hands back a cached node for a named
+			// type, and Omit describes the *field*, not the type. Two fields of the same
+			// struct would otherwise overwrite each other's option.
+			child := cloneNode(c.nodeFor(field.Type, depth+1))
 			child.Omit = omitOption(field.Tag)
 			out.Fields[fieldName] = child
+			yn, yInline, yOmit, yHidden, yUntagged := tagYAML(field.Tag, ident.Name)
+			if !yHidden {
+				out.YAML = append(out.YAML, yamlField{
+					JSON:     fieldName,
+					Name:     yn,
+					Untagged: yUntagged,
+					Inline:   yInline,
+					Omit:     yOmit,
+				})
+			}
 		}
 	}
 	return out
@@ -195,7 +385,20 @@ func (c *ctx) nodeFor(expr ast.Expr, depth int) *node {
 		// A named map or slice (ChannelsConfig, ModelList, FlexibleStringSlice)
 		// resolves through its declaration; reflect would see the same shape.
 		if underlying, ok := c.aliases[e.Name]; ok && depth < 12 {
-			return c.nodeFor(underlying, depth+1)
+			n := c.nodeFor(underlying, depth+1)
+			// Resolving the alias loses the name, and the name is what says whether
+			// this position has a custom MarshalYAML: SecureModelList is a []*ModelConfig
+			// underneath, but the security file writes the hand-built `name:index`
+			// projection its MarshalYAML returns, not a sequence of model structs.
+			// Carrying the flag across the alias is the only way the port can tell.
+			if c.yamlMarshalers[e.Name] {
+				n.Marshaler = true
+			}
+			// ...and the name too, for the same reason: `MarshalYAML` is declared on
+			// SecureModelList, not on []*ModelConfig, so a port that dispatches on the
+			// type it has to recognise the alias, not the shape underneath it.
+			n.Name = e.Name
+			return n
 		}
 		return &node{Kind: "scalar", Name: e.Name}
 	case *ast.SelectorExpr:
@@ -221,6 +424,75 @@ func strip(expr ast.Expr) ast.Expr {
 		}
 		expr = star.X
 	}
+}
+
+// cloneNode copies a node before per-field annotation. Children stay shared: they are
+// only ever read after the walk finishes.
+func cloneNode(n *node) *node {
+	c := *n
+	return &c
+}
+
+// constName reads a map key that is either a string literal or a named constant.
+func constName(expr ast.Expr, consts map[string]string) string {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if v, err := strconv.Unquote(e.Value); err == nil {
+			return v
+		}
+	case *ast.Ident:
+		return consts[e.Name]
+	}
+	return ""
+}
+
+// structOf reads the type name out of a `FooSettings{}` or `&FooSettings{}` literal.
+func structOf(expr ast.Expr) string {
+	for {
+		switch e := expr.(type) {
+		case *ast.UnaryExpr:
+			expr = e.X
+		case *ast.ParenExpr: // the factory writes `(TelegramSettings{})`
+			expr = e.X
+		default:
+			goto build
+		}
+	}
+build:
+	lit, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return ""
+	}
+	return typeString(lit.Type)
+}
+
+// collectKeys reads the keys of a `map[string]struct{}{ "a": {}, ... }` literal.
+func collectKeys(expr ast.Expr, into *[]string) {
+	lit, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if bl, ok := kv.Key.(*ast.BasicLit); ok {
+			if v, err := strconv.Unquote(bl.Value); err == nil {
+				*into = append(*into, v)
+			}
+		}
+	}
+	sort.Strings(*into)
+}
+
+// receiverName is the base type name of a method receiver, so `func (v SecureModelList)`
+// and `func (b Channel)` both resolve to the struct name the dump keys on.
+func receiverName(fl *ast.FieldList) string {
+	if len(fl.List) == 0 {
+		return ""
+	}
+	return typeString(strip(fl.List[0].Type))
 }
 
 func tagJSONName(tag *ast.BasicLit) string {
