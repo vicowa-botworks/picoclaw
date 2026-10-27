@@ -75,8 +75,13 @@ type node struct {
 	// than no `settings` key. Neither is visible in a dump of the stored document,
 	// because neither is in it.
 	//
-	// An embedded struct splices its own list in at that position, which is what
-	// encoding/json does. A field tagged json:"-" is absent, as from Fields.
+	// An embedded struct splices its own list in at that position. That models the
+	// no-conflict half of typeFields: a promoted field *also* loses to a shallower one
+	// with the same name, and same-depth ties are dropped outright -- the rule that
+	// hoists `session` above `version` at the root (see the Config case in structNode).
+	// No colliding key exists in the tree today, so the splice is exact as things stand;
+	// it stops being exact the day someone adds one. A field tagged json:"-" is absent,
+	// as from Fields.
 	JSONFields []jsonField `json:"json_fields,omitempty"`
 	// BaseFields is set on the Channel node only: the JSON keys that belong to Channel
 	// itself rather than to a channel's settings. pkg/config/migration.go decides which
@@ -87,6 +92,20 @@ type node struct {
 	// SettingsSchemas is set on the Channel node only: channel type -> the struct its
 	// settings decode into, with that struct's yaml and json emission lists.
 	SettingsSchemas map[string]*node `json:"settings_schemas,omitempty"`
+	// JSONMarshaler says this type declares its own `MarshalJSON()`, so the bytes that
+	// go out are whatever that method returns and `json_fields` is at best the shape it
+	// usually builds from. Read it as "do not write this node from json_fields alone".
+	//
+	// It is deliberately a flag rather than a suppression of `json_fields`, because
+	// Channel declares one and its list *is* exactly what goes out -- the type-alias
+	// trick inside MarshalJSON marshals the declaration order. Suppressing on the flag
+	// would throw away the one list the port most needs. The five where the flag means
+	// "the list lies" are named on `ctx.jsonMarshalers`.
+	//
+	// The absence of `json_fields` on a node that has this flag is itself a claim:
+	// SecureString is a struct with no exported fields, so it has no list, but its
+	// MarshalJSON writes the *string* "[NOT_HERE]" -- 36 positions in a real config.
+	JSONMarshaler bool `json:"json_marshaler,omitempty"`
 	// Marshaler says this type implements yaml.Marshaler, so its own MarshalYAML
 	// decides what is emitted and the generic walk below must not run for it. Four
 	// types in pkg/config do: SecureModelList, Channel, SkillRegistryConfig and
@@ -176,6 +195,14 @@ type ctx struct {
 	// running the generic walk instead produces a file with the struct's shape where
 	// Go writes a hand-built secrets-only projection.
 	yamlMarshalers map[string]bool
+	// jsonMarshalers is every type in the directory that declares its own
+	// `MarshalJSON()`. Six do, and for five of them the bytes that go out are not the
+	// struct's fields: EvolutionConfig's shadow struct drops two keys, AgentModelConfig
+	// emits a bare string, SkillRegistryConfig marshals a hand-built map (so sorted),
+	// SecureString writes a placeholder string, and Config's aux wrapper hoists `session`
+	// above every promoted field. The sixth, Channel, declares one whose output *is* the
+	// declaration order -- which is why this is a flag and not a suppression.
+	jsonMarshalers map[string]bool
 }
 
 // tagYAML reads a struct tag's yaml part.
@@ -227,6 +254,7 @@ func main() {
 		settingsTypes:  map[string]string{},
 		cache:          map[string]*node{},
 		yamlMarshalers: map[string]bool{},
+		jsonMarshalers: map[string]bool{},
 	}
 
 	files, err := os.ReadDir(dir)
@@ -288,9 +316,15 @@ func main() {
 					}
 				}
 			}
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "MarshalYAML" && fn.Recv != nil {
-				c.yamlMarshalers[receiverName(fn.Recv)] = true
-				continue
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv != nil {
+				switch fn.Name.Name {
+				case "MarshalYAML":
+					c.yamlMarshalers[receiverName(fn.Recv)] = true
+					continue
+				case "MarshalJSON":
+					c.jsonMarshalers[receiverName(fn.Recv)] = true
+					continue
+				}
 			}
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.TYPE {
@@ -330,7 +364,8 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 	if cached, ok := c.cache[name]; ok && depth > 0 {
 		return cached
 	}
-	out := &node{Kind: "struct", Fields: map[string]*node{}, Name: name, Marshaler: c.yamlMarshalers[name]}
+	out := &node{Kind: "struct", Fields: map[string]*node{}, Name: name,
+		Marshaler: c.yamlMarshalers[name], JSONMarshaler: c.jsonMarshalers[name]}
 	if name == "Channel" {
 		out.BaseFields = c.baseFields
 		// Each channel type's settings struct, walked with its own yaml table. This is
@@ -352,6 +387,13 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 		if len(field.Names) == 0 {
 			// embedded
 			tn := typeString(field.Type)
+			// Only a named struct declared in this package can be walked. That excludes
+			// an embedded *pointer* (`typeString` yields "*ToolConfig", which never hits
+			// c.named) and a struct declared outside pkg/config -- and reflect flattens
+			// both, so both are a real limit rather than a gap in the data. Neither
+			// occurs in the tree today; the two emission lists are now supposed to agree,
+			// so the limit is written down instead of being silently inherited by a port
+			// that assumes the walk is complete.
 			if !c.named[tn] {
 				continue
 			}
@@ -410,6 +452,32 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 			}
 		}
 	}
+	// `Config` is the one node whose emission order is not its declaration order, and it
+	// is the top of the document the whole list exists to describe, so it is modelled
+	// rather than merely flagged. `Config.MarshalJSON` (config.go:252) marshals an
+	// anonymous wrapper that declares `Session` as its own depth-0 field and embeds
+	// `*Alias` beside it. typeFields takes depth-0 names first, so `session` wins the
+	// name conflict with the promoted field *and* sorts ahead of every one of them:
+	// Go's actual order is `session, version, isolation, agents, evolution,
+	// channel_list, ...`. A port that wrote the declaration order would put `session`
+	// fourth -- a different document to anything that compares bytes, in exactly the case
+	// the wrapper exists for.
+	//
+	// The wrapper's `session,omitempty` is a *pointer*, so the omit rule here is Go's
+	// pointer rule (nil is empty) and not the value-struct rule that keeps `isolation: {}`
+	// in the file: MarshalJSON sets the pointer only when one of the three dimensions,
+	// identity_links or dm_scope is non-empty.
+	if name == "Config" {
+		for i, f := range out.JSONFields {
+			if f.JSON == "session" {
+				out.JSONFields = append(
+					[]jsonField{f},
+					append(out.JSONFields[:i:i], out.JSONFields[i+1:]...)...,
+				)
+				break
+			}
+		}
+	}
 	return out
 }
 
@@ -428,8 +496,15 @@ func (c *ctx) nodeFor(expr ast.Expr, depth int) *node {
 			// underneath, but the security file writes the hand-built `name:index`
 			// projection its MarshalYAML returns, not a sequence of model structs.
 			// Carrying the flag across the alias is the only way the port can tell.
+			// Annotated on a clone: nodeFor returns the cached node for the underlying
+			// type, and these three fields describe the *alias*, not that type. Writing
+			// through would mark every other position that resolves to the same shape.
+			n = cloneNode(n)
 			if c.yamlMarshalers[e.Name] {
 				n.Marshaler = true
+			}
+			if c.jsonMarshalers[e.Name] {
+				n.JSONMarshaler = true
 			}
 			// ...and the name too, for the same reason: `MarshalYAML` is declared on
 			// SecureModelList, not on []*ModelConfig, so a port that dispatches on the
@@ -477,6 +552,7 @@ func cloneNode(n *node) *node {
 	}
 	if n.JSONFields != nil {
 		c.JSONFields = append([]jsonField(nil), n.JSONFields...)
+		c.JSONMarshaler = n.JSONMarshaler
 	}
 	return &c
 }
