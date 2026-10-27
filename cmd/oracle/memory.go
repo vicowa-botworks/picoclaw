@@ -1002,6 +1002,23 @@ func memoryCases() []fixtureCase {
 					"  \"updated_at\": \"2023-11-14T22:13:21Z\"\n}"),
 			stepSetSummary("s1", "summarised"),
 			stepGetMeta("s1")),
+		// The sibling of the case above, and the one that pins the *count* test.
+		// addMsg's guard is `meta.Count == 0 && meta.CreatedAt.IsZero()` while
+		// SetSummary's is only the IsZero half, so a meta that already counts
+		// messages but carries no created_at is stamped by SetSummary and left at
+		// year 1 by addMsg. A port that shares one "stamp if unset" helper between
+		// the two gets exactly one of these cases right, and this is the one it
+		// gets wrong. count is deliberately 5 against a one-line history: addMsg
+		// increments the stored number rather than recounting the file, so a port
+		// that derives it writes 2 here.
+		memoryCase("add_message_keeps_created_at_when_count_is_nonzero",
+			stepAddSimple("s1", "user", "hi"),
+			stepWriteRawMeta("s1",
+				"{\n  \"key\": \"s1\",\n  \"summary\": \"\",\n  \"skip\": 0,\n  \"count\": 5,\n"+
+					"  \"created_at\": \"0001-01-01T00:00:00Z\",\n"+
+					"  \"updated_at\": \"2023-11-14T22:13:21Z\"\n}"),
+			stepAddSimple("s1", "user", "again"),
+			stepGetMeta("s1")),
 		// writeMeta marshals the struct it was handed; only UpsertSessionMeta
 		// calls normalizeAliases. So a meta written by hand with blanks,
 		// duplicates and the canonical key inside its alias list keeps all of
