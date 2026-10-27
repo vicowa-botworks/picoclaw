@@ -596,5 +596,103 @@ func configCases() []fixtureCase {
 		configCaseErr("unknown_top_level_key_is_refused", 1,
 			cfgWrite("config.json", `{"version":3,"bogus":1}`),
 			cfgLoad("config.json")),
+
+		// ----------------------------------------------------------------- channels
+		// Everything above pins what a channel entry looks like when the file names
+		// its type. These pin the stage that turns a stored `settings` map into the
+		// typed struct -- InitChannelList -- whose whole effect is that the loaded
+		// value carries the struct, not the map. Each case here exists because
+		// injecting the opposite behaviour into the Rust port left every case above
+		// passing; the default channel list alone cannot see any of them.
+
+		// "Infer Type from map key if not explicitly set": a channel keyed by a known
+		// type name needs no `type` field, and it gets that type's settings struct --
+		// every field of it, in declaration order.
+		configCase("channel_type_is_inferred_from_the_key",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"maixcam":`+
+				`{"enabled":true,"settings":{"host":"10.0.0.4"}}}}`),
+			cfgLoad("config.json")),
+
+		// The same inference is what refuses a channel named after nothing: the key
+		// *becomes* the type, so a friendly name like "mybot" is an unknown type and
+		// the load fails. A user gets this for a config that looks perfectly ordinary,
+		// and a port that defaulted an unrecognised type to telegram would load it.
+		configCaseErr("a_channel_key_that_is_no_type_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"mychan":`+
+				`{"enabled":true,"settings":{"token":"x"}}}}`),
+			cfgLoad("config.json")),
+
+		// And the explicit type wins over the key, so a slack channel under a
+		// telegram-shaped name gets slack's struct (which is empty, so `settings`
+		// comes back as `{}` rather than as the keys the file mentioned).
+		configCase("explicit_channel_type_wins_over_the_key",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":`+
+				`{"type":"slack","settings":{"bot_token":"x","app_token":"y"}}}}`),
+			cfgLoad("config.json")),
+
+		// A type the registry does not know is refused at load, not ignored: the
+		// alternative is a channel that silently has no settings at all.
+		configCaseErr("unknown_channel_type_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"x":{"type":"nosuchtype"}}}`),
+			cfgLoad("config.json")),
+
+		// A `null` entry is deleted rather than refused. What it must not do is
+		// delete the default channel list with it.
+		configCase("a_null_channel_entry_is_dropped",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":null}}`),
+			cfgLoad("config.json")),
+
+		// `"streaming": {"enabled": false}` means off, and the struct cannot say
+		// that -- false is the zero value, so `streaming,omitzero` drops the whole
+		// section and the reader would fall back to its own default. Go puts the
+		// explicit false back through a map round trip, which also re-sorts every
+		// key in the settings object.
+		configCase("explicitly_disabled_streaming_survives",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":false}}}}}`),
+			cfgLoad("config.json")),
+
+		// A number with a fraction does not load into an int field, even when its value
+		// is an integer: Go refuses `1500.0` for `media_group_delay_ms` outright. The
+		// obvious port -- round-trip the number through the field's type -- accepts a
+		// document the shipped binary rejects, and then writes it back.
+		configCaseErr("a_fractional_number_in_an_int_channel_field", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"media_group_delay_ms":1500.0}}}}`),
+			cfgLoad("config.json")),
+
+		// The sibling of the case above, and the reason that case says anything: the
+		// same field with the same value written without a fraction loads fine. Without
+		// it the refusal is only attributable to the document as a whole -- the field,
+		// the channel type and the fraction are all equally suspected, and a port that
+		// refuses all three numbers for one shared wrong reason still passes.
+		configCase("an_integer_in_an_int_channel_field_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"media_group_delay_ms":1500}}}}`),
+			cfgLoad("config.json")),
+
+		// What a slice in a channel actually does, measured rather than assumed. The
+		// tempting claim -- nil marshals as null and [] as [], so the two are different
+		// documents -- is false here, and false in a way a port would get wrong in the
+		// safe-looking direction: `Channel.AllowFrom` is `json:"allow_from,omitempty"`
+		// (config_channel.go:227), and `omitempty` drops a length-0 slice exactly as it
+		// drops a nil one. So in the loaded value absent, `null` and `[]` are one thing,
+		// and only a non-empty list survives.
+		//
+		// That is a real port trap, not a curiosity: `Option<Vec<String>>` with
+		// `skip_serializing_if = "Option::is_none"` writes `[]` for the empty case, which
+		// is a document Go never writes and which a later load then reads back as one
+		// permitted sender with an empty id.
+		//
+		// Second thing this case pins, and the only reason to keep three channels rather
+		// than one: `channel_list` is a Go map, so it marshals with **sorted** keys and
+		// the file's `a`, `b`, `c` lead the built-in defaults instead of trailing them.
+		// No other case has a file-provided channel sorting ahead of a default.
+		configCase("an_empty_channel_list_is_indistinguishable_from_an_absent_one",
+			cfgWrite("config.json", `{"version":3,"channel_list":{`+
+				`"a":{"enabled":true,"type":"telegram"},`+
+				`"b":{"enabled":true,"type":"telegram","allow_from":[]},`+
+				`"c":{"enabled":true,"type":"telegram","allow_from":["1"]}}}`),
+			cfgLoad("config.json")),
 	}
 }
