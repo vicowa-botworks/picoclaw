@@ -550,9 +550,10 @@ func configCases() []fixtureCase {
 		//
 		// What this case does *not* pin is the legacy pass's explicit `continue` on the
 		// name `registries` (security.go:104). Measured, dropping that skip changes
-		// nothing: a `registries` entry decoded as a registry has no auth_token of its
-		// own, so the token rule below skips it anyway. The skip is defence in depth
-		// in Go and unobservable from the corpus, so it is not claimed here.
+		// nothing here: a `registries` entry decoded as a registry has no auth_token of
+		// its own, so the token rule below skips it anyway. The skip is pinned by
+		// `security_a_scalar_under_registries_loads_unchanged` instead, where removing
+		// it turns a file that loads into one that is refused.
 		configCase("security_registries_path_sets_the_registry_token",
 			cfgWrite("config.json", `{"version":3}`),
 			cfgWrite(".security.yml", "skills:\n    registries:\n        clawhub:\n"+
@@ -571,6 +572,119 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":3}`),
 			cfgWrite(".security.yml", "skills:\n    other:\n        base_url: https://x\n"+
 				"    github:\n        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// The eight cases below exist because eight injected faults in the Rust port
+		// walked through the corpus above. Each one is the fault's own shape: a filter
+		// removed, a guard widened, a skip dropped.
+		//
+		// A scalar under `registries` loads, and changes nothing. The yaml pass walks
+		// `value.Content` for its mapping pairs and a scalar node has none, so it finds
+		// zero registries and no error -- and the legacy pass never reaches it either,
+		// because that is the one key its loop names and skips.
+		//
+		// The skip is the whole reason this file loads. Remove it and the same bytes
+		// are refused: the legacy pass decodes every other value into a
+		// SkillRegistryConfig, whose `UnmarshalYAML` decodes into a `map[string]any`,
+		// and a scalar does not decode into a map. So this case pins the skip at
+		// security.go:104 from the only direction that can show it -- not that a
+		// `registries` registry is not created, but that the file is not rejected --
+		// and it pins that a port which refuses this file, or reads the scalar as a
+		// registry name, disagrees with the shipped binary.
+		configCase("security_a_scalar_under_registries_loads_unchanged",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries: tok_direct\n"),
+			cfgLoad("config.json")),
+
+		// `base_url` is filled only when the stored registry has none, so a legacy
+		// entry cannot repoint a registry the config already placed elsewhere. The
+		// stored URL has to be something other than the default for this to say
+		// anything: with `https://github.com` on both sides the two rules agree.
+		configCase("security_legacy_base_url_does_not_replace_a_stored_one",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"github":`+
+				`{"enabled":true,"base_url":"https://stored"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"+
+				"        base_url: https://legacy\n"),
+			cfgLoad("config.json")),
+
+		// `name` is one of the four keys the registry decoder names, so it sets the
+		// entry's name -- which the caller then overwrites with the key it came under.
+		// It never reaches Param, and Param is what marshals, so a port that treats it
+		// as an unknown key emits a `name` key the shipped binary never writes.
+		configCase("security_legacy_name_key_is_not_a_param",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        name: renamed\n"+
+				"        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// An underscore key survives the decode -- only `_auth_token` is named -- and
+		// is dropped on the way out by MarshalJSON's `_` prefix filter. Two filters,
+		// one key: a port that drops it during the decode cannot tell the reader that
+		// `_auth_token` is special for a different reason, and a port that drops
+		// neither writes a key Go hides.
+		configCase("security_legacy_underscore_param_is_dropped_on_the_way_out",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"+
+				"        _internal: hidden\n"),
+			cfgLoad("config.json")),
+
+		// The nested `param` map is merged into the same Param, so `base_url` can arrive
+		// there -- and still cannot displace the `base_url` MarshalJSON writes itself,
+		// because that one goes into the map first and the loop skips keys already
+		// present. A port that appends Param blindly writes the key twice.
+		//
+		// `region` is here for the other half of the same rule. Without a key that is
+		// not one of the three the marshaler writes, a port that never reads `param` at
+		// all produces this document too: `base_url` is dropped by both, so the case
+		// would pin the collision and say nothing about the merge.
+		configCase("security_nested_param_cannot_displace_base_url",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"+
+				"        param:\n            base_url: https://via-param\n"+
+				"            region: eu\n"),
+			cfgLoad("config.json")),
+
+		// The deprecated field is read from the *loaded* value, not from the security
+		// file, so a token already in config.json qualifies the github registry with no
+		// token in the file at all. It also pins the other half of SecureString's JSON
+		// decoder: only the literal `[NOT_HERE]` is refused, so a plaintext token in
+		// config.json is read as a value -- and it stays invisible in the loaded value,
+		// because the field itself marshals to nothing.
+		configCase("security_github_token_already_in_the_config_fills_the_registry",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":`+
+				`{"token":"ghp_doc"}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        base_url: https://legacy\n"),
+			cfgLoad("config.json")),
+
+		// `auth_token` reaches the SecureString through yaml.Marshal of whatever the
+		// generic decode produced, so any scalar arrives as its printed text: `true`
+		// is the four-character string, which is non-empty, which is a token. A port
+		// that types the field as a string and drops what is not one loses the
+		// registry entirely -- the emptiness test is what decides creation.
+		configCase("security_a_bool_auth_token_reads_as_a_string",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        clawhub:\n"+
+				"            auth_token: true\n"),
+			cfgLoad("config.json")),
+
+		// A `registries` entry in config.json merges into the one the defaults carry,
+		// because the type's `UnmarshalJSON` clones the stored entry and decodes over the
+		// clone. Naming only `enabled` therefore leaves `base_url` at the default rather
+		// than at the empty string -- the opposite of `channel_list`, where a map entry
+		// is allocated fresh and the same document does wipe the defaults. The two
+		// spellings look alike in a file and are decided by different code.
+		configCase("config_registries_entry_merges_into_the_default",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":`+
+				`{"github":{"enabled":true}}}}}`),
+			cfgLoad("config.json")),
+
+		// Registry names are trimmed, so a quoted key with padding lands on the entry
+		// the defaults already carry instead of creating one whose name has spaces in
+		// it. `clawhub` rather than `github` because the github path has the token
+		// fallback, which would let an untrimmed port reach the same entry anyway.
+		configCase("security_a_padded_registry_name_is_trimmed",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    \" clawhub \":\n        auth_token: tok_pad\n"),
 			cfgLoad("config.json")),
 
 		// ---------------------------------------------------------------- the pair --
