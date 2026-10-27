@@ -687,6 +687,112 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "skills:\n    \" clawhub \":\n        auth_token: tok_pad\n"),
 			cfgLoad("config.json")),
 
+		// ------------------------------------ security -- shapes the port could not see
+		//
+		// Six faults injected into the Rust port walked through a green 53-case
+		// replay. Each case here is one of them, and the expectation is what the
+		// shipped binary recorded rather than anything argued from the source.
+		//
+		// Two things about the shape. First, none of these puts a `save` between the
+		// two files, and that is the whole reason they were missing: a save moves
+		// every secret out of config.json and into .security.yml, so by a second load
+		// the JSON document no longer holds the value under test.
+		// `security_entry_replaces_the_json_model` reads like proof that a security
+		// entry without `api_keys` clears the model's keys, but it cannot tell
+		// "cleared" from "left alone" -- the key it compares against had already been
+		// written out of config.json three steps earlier. The case below has no save,
+		// so `sk-1` is still in the document when the security file is applied.
+		//
+		// Second, the channel cases probe with `media_group_delay_ms` and
+		// `mention_only`, not with a token. Two earlier drafts of these two cases used
+		// `bot_token` and a `typing` node and both recorded a value *byte-identical to
+		// the same config with no security file at all*: `bot_token` is a SecureString,
+		// which `encoding/json` never writes, and `typing` is a Channel field rather
+		// than a settings field, so it is `yaml:"-"` and unreadable from this file. A
+		// case that cannot differ from its own control witnesses nothing, so the
+		// probes are non-secret settings keys.
+		//
+		// What they then showed is an asymmetry between the two files that neither
+		// tag suggests: a channel the *config* names replaces its default outright,
+		// while a channel only the *security file* names merges into it.
+
+		// A security entry that names a model but carries no `api_keys` clears the
+		// keys the JSON document had. `SecureModelList.UnmarshalYAML` assigns the
+		// entry's keys to the matching model rather than merging, so an entry with
+		// nothing in them is an assignment of nil, not a no-op. A port that skips an
+		// entry with no keys keeps `sk-1` and writes a model the shipped binary has no
+		// credentials for.
+		configCase("security_entry_without_api_keys_against_live_json_keys",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0: {}\n"),
+			cfgLoad("config.json")),
+
+		// A real model field in a security entry is not read: `provider` stays
+		// `openrouter`, from the JSON document, and the keys are still cleared. The
+		// recorded value is identical to the case above, which is the point -- the
+		// security entry's only effect is on `api_keys`, so a port that copies other
+		// fields over writes `provider: anthropic` and fails here.
+		configCase("security_entry_carrying_a_real_model_field",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n      provider: anthropic\n"),
+			cfgLoad("config.json")),
+
+		// The config names telegram and gives it one settings key, so the channel
+		// *replaces* its default and every settings field the file left out comes back
+		// zero -- `media_group_delay_ms: 0`, not the default 500. The security file
+		// then sets that same field to 1234, and it lands. So the security settings
+		// merge into what the *file* said, which is the only place the zeros can come
+		// from: a port that merges into the defaults-filled document emits 500 here and
+		// passes every case that never mentions settings.
+		configCase("security_channel_settings_merge_into_the_file_not_the_defaults",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"bot_token":"123:abc"}}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        settings:\n"+
+				"            media_group_delay_ms: 1234\n"),
+			cfgLoad("config.json")),
+
+		// The mirror image, and the reason the two cannot share one rule: discord is
+		// in neither the config nor a user's file, only in the defaults and in the
+		// security file. It comes back with `mention_only: true` from the security file
+		// *and* its default `enabled: false`, `proxy: ""`. So a security channel
+		// merges into the default where a config channel replaces it -- one merge rule
+		// for both files is wrong on one of them, and the direction it goes wrong in
+		// depends on which file the port reads first.
+		configCase("security_channel_list_entry_merges_into_the_default",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram"}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    discord:\n        settings:\n"+
+				"            mention_only: true\n"),
+			cfgLoad("config.json")),
+
+		// The legacy skills pass runs on the *migration* path too, not only on the
+		// current version: a v1 config with a legacy `skills.github.token` comes back
+		// with the secret twice in the registry -- masked as `auth_token` and in
+		// plaintext as `token` -- exactly as the v3 load does. The migration pre-merge
+		// lifts `web` and `skills` into `tools` as plain data and the pass then runs
+		// over the merged document, so a port that ports the pass for the current
+		// version only pins half of it.
+		configCase("security_legacy_token_on_the_migration_path",
+			cfgWrite("config.json", `{"version":1}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_mig\n"),
+			cfgLoad("config.json")),
+
+		// A literal `tools:` section in the security file is discarded. `Tools` is
+		// inlined, so the readable sections are `web` and `skills` at the top level and
+		// `tools` is not one of them; the migration pre-merge then assigns
+		// `m2["tools"] = m3` wholesale, so anything the file put under `tools` is
+		// overwritten rather than merged. `ghp_from_tools` does not reach the registry,
+		// while `ghp_mig` in the case above does -- which is what makes this a test of
+		// the assignment and not of the unmarshal. A port that extends instead of
+		// replacing writes a second credential the shipped binary never reads.
+		configCase("migration_security_tools_section_is_dropped",
+			cfgWrite("config.json", `{"version":1}`),
+			cfgWrite(".security.yml", "tools:\n    skills:\n        github:\n"+
+				"            token: ghp_from_tools\nweb:\n    brave:\n        api_keys: [bk]\n"),
+			cfgLoad("config.json")),
+
 		// ---------------------------------------------------------------- the pair --
 		//
 		// .security.yml is the yaml-tagged half and the JSON document is the rest;
