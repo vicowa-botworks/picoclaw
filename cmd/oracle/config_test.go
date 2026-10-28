@@ -33,8 +33,8 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 	if second := render(); first != second {
 		t.Fatal("the config corpus is not reproducible")
 	}
-	if n := len(configCases()); n != 41 {
-		t.Errorf("config seam has %d cases, want 41", n)
+	if n := len(configCases()); n != wantConfigCaseCount {
+		t.Errorf("config seam has %d cases, want %d", n, wantConfigCaseCount)
 	}
 	sum := sha256.Sum256([]byte(first))
 	if got := hex.EncodeToString(sum[:]); got != wantConfigCorpusSHA {
@@ -44,7 +44,13 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 	}
 }
 
-const wantConfigCorpusSHA = "6d8e24fa985a3b5c8203d423024389423e2899097cd679cca9ad8a595576e673"
+// wantConfigCaseCount is spelled once, next to the digest, because the two are the same
+// assertion wearing different clothes: a case added without a re-pin moves both, and a
+// message that hardcodes the number goes stale the moment someone updates the check above
+// and only looks at that line.
+const wantConfigCaseCount = 84
+
+const wantConfigCorpusSHA = "0360a451d927ae34540c569d97c194aa560fda5b3ce745dc48bd26ea963a384a"
 
 // TestConfigCorpusIgnoresTheMachine is the part the digest above cannot prove on
 // its own: it runs the generator with the environment a real user would have and

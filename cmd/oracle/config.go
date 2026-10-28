@@ -498,6 +498,493 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "model_list:\n    - model_name: m1\n"),
 			cfgLoad("config.json")),
 
+		// ---------------------------------------------------------------- security --
+		//
+		// What the security file can say is narrower than its struct suggests, and
+		// narrower per section: inside `web` only `api_keys` is readable (Brave,
+		// Tavily, Kagi, ... all tag `enabled`, `base_url` and `max_results`
+		// `yaml:"-"`), inside a skills registry only `auth_token` plus whatever keys
+		// land in Param, and inside `model_list` nothing at all. The file exists to
+		// hold secrets, so every non-secret field of these types is JSON-only -- and a
+		// port that reads `enabled` out of the security file is inventing a key the
+		// shipped binary ignores.
+		//
+		// `skills` additionally gets a second, legacy pass (applyLegacySkillsSecurity-
+		// Config, security.go:96) that the plain unmarshal does not cover: a bare
+		// `skills: {github: {...}}` also *creates* a registry entry.
+		//
+		// The web section is NOT pinned here, and cannot be through a load. Its only
+		// readable key is `api_keys`, a SecureStrings, and SecureStrings.IsZero
+		// (config_struct.go:114) returns true whenever the caller is not the YAML
+		// encoder -- deliberately, on the comment's own words, "to prevent marshal
+		// this field". So under `encoding/json` every `omitzero` secure field is
+		// omitted whatever it holds, and a security file's `web.brave.api_keys` leaves
+		// the loaded value byte-identical to one with no security file at all. That
+		// was measured, not read: the candidate case for it recorded the same value
+		// with and without the section, so it is not in the corpus. The merge is
+		// observable only in what `save` writes back, so it belongs with the save
+		// cases.
+
+		// A legacy `skills.github.token` does two things, and only the second is what
+		// the plain unmarshal does. It reaches tools.skills.github.token -- which then
+		// marshals as *nothing*, for the IsZero reason above -- and the legacy pass
+		// copies the same value into the `github` registry's Param, where
+		// SkillRegistryConfig.MarshalJSON (config_struct.go:503) re-emits it
+		// **in plaintext** beside a masked `auth_token: "[NOT_HERE]"`. So one secret
+		// appears twice in the loaded value, once hidden and once not, and the
+		// difference is that MarshalJSON builds the registry object by hand and cannot
+		// see the omit options. A port that reads the section once leaves the registry
+		// list untouched and every skill install then reports no credentials; a port
+		// that masks Param leaks nothing but disagrees with Go byte for byte.
+		configCase("security_legacy_github_token_becomes_a_registry",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// The modern path, `skills.registries.<name>.auth_token`, is handled by the
+		// plain unmarshal alone and reaches the registry the defaults already carry.
+		// Renaming `registries` to a registry name moves the token to a different
+		// entry, which is what makes this case more than a restatement of the one
+		// above: the two spellings are two different code paths, and the file decides
+		// which by one key.
+		//
+		// What this case does *not* pin is the legacy pass's explicit `continue` on the
+		// name `registries` (security.go:104). Measured, dropping that skip changes
+		// nothing here: a `registries` entry decoded as a registry has no auth_token of
+		// its own, so the token rule below skips it anyway. The skip is pinned by
+		// `security_a_scalar_under_registries_loads_unchanged` instead, where removing
+		// it turns a file that loads into one that is refused.
+		configCase("security_registries_path_sets_the_registry_token",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        clawhub:\n"+
+				"            auth_token: tok_claw\n"),
+			cfgLoad("config.json")),
+
+		// A legacy registry entry with no token is skipped outright (the `continue` at
+		// security.go:159), so it never reaches the registry list. The entry carries a
+		// `base_url` rather than being empty so the skip is actually visible: an
+		// unknown key lands in Param and Param is re-emitted by MarshalJSON, so a port
+		// without the skip produces a `other` registry showing that base_url, and a
+		// port with it shows nothing. A name that is not `github` also cannot borrow
+		// the github token to qualify -- the github entry in the same file is what
+		// makes that distinction real rather than vacuous.
+		configCase("security_legacy_registry_without_a_token_is_skipped",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    other:\n        base_url: https://x\n"+
+				"    github:\n        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// The eight cases below exist because eight injected faults in the Rust port
+		// walked through the corpus above. Each one is the fault's own shape: a filter
+		// removed, a guard widened, a skip dropped.
+		//
+		// A scalar under `registries` loads, and changes nothing. The yaml pass walks
+		// `value.Content` for its mapping pairs and a scalar node has none, so it finds
+		// zero registries and no error -- and the legacy pass never reaches it either,
+		// because that is the one key its loop names and skips.
+		//
+		// The skip is the whole reason this file loads. Remove it and the same bytes
+		// are refused: the legacy pass decodes every other value into a
+		// SkillRegistryConfig, whose `UnmarshalYAML` decodes into a `map[string]any`,
+		// and a scalar does not decode into a map. So this case pins the skip at
+		// security.go:104 from the only direction that can show it -- not that a
+		// `registries` registry is not created, but that the file is not rejected --
+		// and it pins that a port which refuses this file, or reads the scalar as a
+		// registry name, disagrees with the shipped binary.
+		configCase("security_a_scalar_under_registries_loads_unchanged",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries: tok_direct\n"),
+			cfgLoad("config.json")),
+
+		// `base_url` is filled only when the stored registry has none, so a legacy
+		// entry cannot repoint a registry the config already placed elsewhere. The
+		// stored URL has to be something other than the default for this to say
+		// anything: with `https://github.com` on both sides the two rules agree.
+		configCase("security_legacy_base_url_does_not_replace_a_stored_one",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"github":`+
+				`{"enabled":true,"base_url":"https://stored"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"+
+				"        base_url: https://legacy\n"),
+			cfgLoad("config.json")),
+
+		// `name` is one of the four keys the registry decoder names, so it sets the
+		// entry's name -- which the caller then overwrites with the key it came under.
+		// It never reaches Param, and Param is what marshals, so a port that treats it
+		// as an unknown key emits a `name` key the shipped binary never writes.
+		configCase("security_legacy_name_key_is_not_a_param",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        name: renamed\n"+
+				"        token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// An underscore key survives the decode -- only `_auth_token` is named -- and
+		// is dropped on the way out by MarshalJSON's `_` prefix filter. Two filters,
+		// one key: a port that drops it during the decode cannot tell the reader that
+		// `_auth_token` is special for a different reason, and a port that drops
+		// neither writes a key Go hides.
+		configCase("security_legacy_underscore_param_is_dropped_on_the_way_out",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"+
+				"        _internal: hidden\n"),
+			cfgLoad("config.json")),
+
+		// The nested `param` map is merged into the same Param, so `base_url` can arrive
+		// there -- and still cannot displace the `base_url` MarshalJSON writes itself,
+		// because that one goes into the map first and the loop skips keys already
+		// present. A port that appends Param blindly writes the key twice.
+		//
+		// `region` is here for the other half of the same rule. Without a key that is
+		// not one of the three the marshaler writes, a port that never reads `param` at
+		// all produces this document too: `base_url` is dropped by both, so the case
+		// would pin the collision and say nothing about the merge.
+		configCase("security_nested_param_cannot_displace_base_url",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_legacy\n"+
+				"        param:\n            base_url: https://via-param\n"+
+				"            region: eu\n"),
+			cfgLoad("config.json")),
+
+		// The deprecated field is read from the *loaded* value, not from the security
+		// file, so a token already in config.json qualifies the github registry with no
+		// token in the file at all. It also pins the other half of SecureString's JSON
+		// decoder: only the literal `[NOT_HERE]` is refused, so a plaintext token in
+		// config.json is read as a value -- and it stays invisible in the loaded value,
+		// because the field itself marshals to nothing.
+		configCase("security_github_token_already_in_the_config_fills_the_registry",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":`+
+				`{"token":"ghp_doc"}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        base_url: https://legacy\n"),
+			cfgLoad("config.json")),
+
+		// `auth_token` reaches the SecureString through yaml.Marshal of whatever the
+		// generic decode produced, so any scalar arrives as its printed text: `true`
+		// is the four-character string, which is non-empty, which is a token. A port
+		// that types the field as a string and drops what is not one loses the
+		// registry entirely -- the emptiness test is what decides creation.
+		configCase("security_a_bool_auth_token_reads_as_a_string",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        clawhub:\n"+
+				"            auth_token: true\n"),
+			cfgLoad("config.json")),
+
+		// A `registries` entry in config.json merges into the one the defaults carry,
+		// because the type's `UnmarshalJSON` clones the stored entry and decodes over the
+		// clone. Naming only `enabled` therefore leaves `base_url` at the default rather
+		// than at the empty string -- the opposite of `channel_list`, where a map entry
+		// is allocated fresh and the same document does wipe the defaults. The two
+		// spellings look alike in a file and are decided by different code.
+		configCase("config_registries_entry_merges_into_the_default",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":`+
+				`{"github":{"enabled":true}}}}}`),
+			cfgLoad("config.json")),
+
+		// Registry names are trimmed, so a quoted key with padding lands on the entry
+		// the defaults already carry instead of creating one whose name has spaces in
+		// it. `clawhub` rather than `github` because the github path has the token
+		// fallback, which would let an untrimmed port reach the same entry anyway.
+		configCase("security_a_padded_registry_name_is_trimmed",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    \" clawhub \":\n        auth_token: tok_pad\n"),
+			cfgLoad("config.json")),
+
+		// ------------------------------------ security -- shapes the port could not see
+		//
+		// Twenty cases over six shapes the earlier corpus never used. The set was
+		// established by injecting faults into the Rust port and recording which ones
+		// walked through a green 53-case replay, not by listing the branches of
+		// `apply_security` and ticking them off: the first six faults became six cases,
+		// and a second round over the same surface still found holes. Every expectation
+		// is what the shipped binary recorded rather than anything argued from the
+		// source.
+		//
+		// Two things about the shape. First, none of these puts a `save` between the
+		// two files, and that is the whole reason they were missing: a save moves
+		// every secret out of config.json and into .security.yml, so by a second load
+		// the JSON document no longer holds the value under test.
+		// `security_entry_replaces_the_json_model` reads like proof that a security
+		// entry without `api_keys` clears the model's keys, but it cannot tell
+		// "cleared" from "left alone" -- the key it compares against had already been
+		// written out of config.json three steps earlier. The case below has no save,
+		// so `sk-1` is still in the document when the security file is applied.
+		//
+		// Second, the channel cases probe with `media_group_delay_ms` and
+		// `mention_only`, not with a token. Two earlier drafts of these two cases used
+		// `bot_token` and a `typing` node and both recorded a value *byte-identical to
+		// the same config with no security file at all*: `bot_token` is a SecureString,
+		// which `encoding/json` never writes, and `typing` is a Channel field rather
+		// than a settings field, so it is `yaml:"-"` and unreadable from this file. A
+		// case that cannot differ from its own control witnesses nothing, so the
+		// probes are non-secret settings keys.
+		//
+		// What they then showed is an asymmetry between the two files that neither
+		// tag suggests: a channel the *config* names replaces its default outright,
+		// while a channel only the *security file* names merges into it.
+
+		// The last shape the security file's `model_list` can be written in, and the one
+		// that settles where a generated `name:index` key goes. The config lists `m2`
+		// first and the file names `m2:0`, while `m1`'s key is generated by the save:
+		// the loaded list is `[m2, m1__key_1, m1]` and the written section comes back
+		// `m1:0: [k1]` then `m2:0: [sk]`. So "insert at the parsed index", "append" and
+		// "follow the model list" are all refused -- the section is a **map**, and Go
+		// marshals maps with sorted keys, so a key's position is a property of its name
+		// and not of how it got there. The model order is the witness: with the list in
+		// name order all three rules write the same bytes, which is why the input here
+		// puts `m2` first. A port that models the section as a list has an insertion
+		// order to choose and passes a corpus that never separates the three.
+		// `virtual_key_models_are_written_back_once` already pins that a multi-key model
+		// contributes only `name:0` with its primary key; this is the case where that
+		// generated key has to share the section with a parsed one.
+		configCase("security_model_list_keys_are_written_sorted_not_in_order",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m2","provider":"p",`+
+				`"model":"r"},{"model_name":"m1","provider":"p","model":"q",`+
+				`"api_keys":["k1","k2"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m2:0:\n        api_keys: [sk]\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A legacy `skills` value that is not a mapping is a refusal, not a no-op. Go's
+		// yaml decode targets the typed `SkillsToolsConfig`, so a scalar, a sequence or a
+		// number is an unmarshal error out of `loadSecurityConfig` and the whole load
+		// fails. One case per shape, because a port that only handles the scalar still
+		// accepts the sequence.
+		configCaseErr("security_skills_scalar_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills: hello\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("security_skills_sequence_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    - github\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("security_skills_number_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills: 7\n"),
+			cfgLoad("config.json")),
+
+		// `null` is the exception, and the reason the three refusals above need their own
+		// cases rather than one "not a mapping" case: yaml.v3 unmarshals a null into the
+		// zero value of the typed target without complaint, so the load succeeds and the
+		// config is unchanged. A port that refuses "not an object" would reject a file Go
+		// accepts -- which is the same class of bug as the refusals above, pointed the other
+		// way.
+		configCase("security_skills_null_loads_unchanged",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills: null\n"),
+			cfgLoad("config.json")),
+
+		// A `.security.yml` is a secrets file, and Go enforces that with tags rather than
+		// with a filter: every field that is not a credential is `yaml:"-"` on the types
+		// the file can reach -- `Channel`'s whole base (`config_channel.go:224-231`), a
+		// search provider's `max_results` (`config.go:896`), and everything else -- so the
+		// file can name a key the target type has and still set nothing. Measured:
+		// `max_results: 9` under `web.brave` leaves the loaded value at the default 5,
+		// identical to no security file. A port that merges whatever the file says sets 9
+		// and produces a config the shipped binary cannot produce from that file.
+		configCase("security_cannot_set_a_field_tagged_yaml_dash",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        max_results: 9\n"),
+			cfgLoad("config.json")),
+
+		// A key the target type does not have at all is dropped, not stored. The security
+		// file is decoded with plain `yaml.Unmarshal` -- not `UnmarshalStrict`, which is what
+		// lets Go read the `web` and `skills` sections at all -- so an unknown key is silent
+		// rather than a refusal, and it must not reach the document either. Pinned at two
+		// depths because the merge walks each one separately: a provider under `web`, and a
+		// top-level struct.
+		configCase("security_unknown_key_under_a_provider_is_dropped",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"+
+				"        bogus: 1\n"),
+			cfgLoad("config.json")),
+
+		// The same unknown key, one op further: neither file it could land in comes back
+		// with it. `config.json` is written from the typed struct and `.security.yml` from
+		// the schema, so a key the security file invented is gone from both. This is the
+		// byte-level half of the rule above -- the load case cannot see it either way, and a
+		// port that renders either file straight from its merged document leaks `bogus` into
+		// the user's config.
+		configCase("security_unknown_key_reaches_neither_written_file",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "agents:\n    bogus: 1\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		configCase("security_unknown_key_under_a_top_level_struct_is_dropped",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "agents:\n    bogus: 1\n"),
+			cfgLoad("config.json")),
+
+		// A settings scalar the config already set is *replaced*, not filled. This is the
+		// one shape that reaches the replace arm of the security merge: the key has to be
+		// present on both sides, because a key only the file has is appended and never
+		// touches that code. Measured 1234, from the file, over the config's 500.
+		configCase("security_settings_replace_a_scalar_the_config_set",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"media_group_delay_ms":500}}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        settings:\n"+
+				"            media_group_delay_ms: 1234\n"),
+			cfgLoad("config.json")),
+
+		// A model entry written with an empty optional field does not keep it. `proxy` and
+		// `api_base` are `omitempty`, so "" is dropped on the way out -- which is a different
+		// document from the one the file had, and the port has to agree about which of the
+		// model's fields are always written (`model_name`, `model`, `provider`) and which are
+		// conditional. Measured: `[{"model_name":"m1","provider":"p","model":"q"}]`.
+		// Not a security case -- there is no `.security.yml` in it. It is in this block
+		// because the mutation round that opened the block is what found it, and the
+		// fault that found it was committed against the model entry's own tags.
+		configCase("model_entry_drops_its_empty_optional_fields",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"q","proxy":"","api_base":""}]}`),
+			cfgLoad("config.json")),
+
+		// The `web` section is applied, and only a save can show it. Measured: the loaded
+		// value for `web.brave.api_keys: [bk]` is byte-identical to the same config with no
+		// security file at all -- every field under `web` that could carry a key is a
+		// `SecureStrings`, and `SecureStrings.IsZero` reports true for any caller but the
+		// YAML encoder, so `encoding/json` never writes one. What does differ is what gets
+		// written back: with the section the security file comes out `brave:` /
+		// `api_keys:` / `- bk`, without it `brave: {}`. So the save is the only rendering
+		// that can witness this merge, and a load case for it would structurally be unable
+		// to see its own subject.
+		configCase("save_writes_back_a_web_key_from_the_security_file",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A security entry that names a model but carries no `api_keys` clears the keys the
+		// JSON document had: `SecureModelList.UnmarshalYAML` *assigns* the entry's keys to
+		// the matching model rather than merging, so an entry with nothing in them assigns
+		// nil rather than doing nothing.
+		//
+		// This is a save case because the load cannot see it, and it was a load case first.
+		// Measured against a control with no security file at all, the recorded loaded value
+		// is **identical** either way -- `api_keys` is a `SecureStrings`, invisible to
+		// `encoding/json` like every other field in that family -- so the case as originally
+		// written passed with the keys cleared and with the keys intact, and its name
+		// claimed the opposite of what its bytes witnessed. What does differ is the file
+		// written back: `m1:0: {}` with the entry, `m1:0:` / `api_keys:` / `- sk-1` without
+		// it. A port that skips an entry with no keys keeps `sk-1` and writes credentials the
+		// shipped binary would have dropped.
+		configCase("save_clears_keys_for_a_security_entry_without_keys",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0: {}\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A real model field in a security entry is not read either -- the pass copies
+		// `api_keys` and nothing else -- which the load cannot show for the same reason:
+		// `provider` is written back from the JSON document either way. So this compares the
+		// two files a save produces. A port that merges the whole entry writes
+		// `provider: anthropic` into config.json and fails here; a port that only ever
+		// merges keys passes, and passes the case above for the right reason.
+		configCase("save_does_not_copy_a_model_field_from_a_security_entry",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"model":"llama-3","api_keys":["sk-1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n      provider: anthropic\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// A nested settings node *fills*, it does not replace. The config says
+		// `streaming.enabled: true`, the security file says `streaming.throttle_seconds: 7`,
+		// and the loaded value carries both. A port that assigns the security node over the
+		// stored one loses `enabled` -- and loses it in the one place a user would notice,
+		// since `streaming` is the section whose explicit `false` Go goes out of its way to
+		// re-inject.
+		configCase("security_channel_settings_fill_a_nested_node",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true}}}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        settings:\n"+
+				"            streaming:\n                throttle_seconds: 7\n"),
+			cfgLoad("config.json")),
+
+		// A channel only the security file names, under a name that is not a channel type.
+		// Refused -- and refused for the reason the case is named for, which is not what I
+		// predicted: the entry's own `type: telegram` is **ignored**, because
+		// `InitChannelList` infers the type from the map key whenever the channel's is empty
+		// (config_channel.go:738) and the security merge leaves it empty even though `type`
+		// is one of Channel's base fields. So the type is `mychan`, `isValidChannelType`
+		// rejects it, and the load fails. A port that reads `type` out of the security entry
+		// accepts the file; a port that only ever walks the channels it already has never
+		// sees the entry at all and also accepts it. Both are wrong in opposite directions,
+		// and only one refusal message names the key rather than a type.
+		configCaseErr("security_channel_list_entry_with_an_unknown_name_is_refused", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "channel_list:\n    mychan:\n        enabled: true\n"+
+				"        type: telegram\n"),
+			cfgLoad("config.json")),
+
+		// A security entry is applied to a channel the *config* already names, and it
+		// merges into that channel instead of replacing it. Telegram is in the config
+		// with one settings key and in the security file with another; the loaded value
+		// carries `media_group_delay_ms: 1234` from the file on a channel that still has
+		// its `enabled: true` and its type. Skipping channels already in the defaults
+		// leaves the 0 here, and replacing the channel instead of merging loses the rest
+		// of it. What this case cannot witness is its earlier name's claim, that the
+		// merge happens into the file's zeros rather than into the defaults-filled
+		// document: every telegram settings default except `media_group_delay_ms` is
+		// zero, and the file overwrites that one, so both stories record the same bytes.
+		// The replaced default is pinned where a field the file does *not* set is
+		// visible -- `security_channel_settings_fill_a_nested_node` records
+		// `media_group_delay_ms: 0` against a default of 500, and
+		// `security_channel_list_entry_merges_into_the_default` shows the other half.
+		configCase("security_settings_apply_to_a_channel_the_config_names",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"bot_token":"123:abc"}}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        settings:\n"+
+				"            media_group_delay_ms: 1234\n"),
+			cfgLoad("config.json")),
+
+		// The mirror image, and the reason the two cannot share one rule: `maixcam` is in
+		// neither the config nor a user's file, only in the defaults and in the security
+		// file. It comes back `settings: {host: "0.0.0.0", port: 9999}` -- the file's
+		// `port` *and* the default `host` it never mentioned. A port that replaces
+		// instead of merging drops `host`. The same case carries the other half of the
+		// asymmetry in its telegram entry: the config names that one, and its
+		// `media_group_delay_ms` comes back 0 where the default is 500, because a channel
+		// the *config* names replaces its default outright. Discord would have witnessed
+		// neither half -- `defaultChannels()` gives it `map[string]any{}` and every field
+		// an earlier draft of this comment offered as evidence is also the zero value, so
+		// merge and replace record identical bytes. One merge rule for both files is
+		// wrong on one of them, and the direction it goes wrong in depends on which file
+		// the port reads first.
+		configCase("security_channel_list_entry_merges_into_the_default",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram"}}}`),
+			cfgWrite(".security.yml", "channel_list:\n    maixcam:\n        settings:\n"+
+				"            port: 9999\n"),
+			cfgLoad("config.json")),
+
+		// A legacy `skills.github.token` reaches the registry on the *migration* path
+		// too, not only on the current version: a v1 config comes back with the secret
+		// twice -- masked as `auth_token` and in plaintext as `token` -- as the v3 load
+		// does. The mechanism is migration's **own in-line lift** (`migration.go:436-457`),
+		// not `applyLegacySkillsSecurityConfig`: deleting that call leaves this case
+		// untouched, while deleting the lift's `githubRegistry["auth_token"] = token`
+		// moves this case and nothing else. Naming the pass here instead would have a
+		// porter implement a call the shipped binary never makes on this path.
+		configCase("security_legacy_token_on_the_migration_path",
+			cfgWrite("config.json", `{"version":1}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_mig\n"),
+			cfgLoad("config.json")),
+
+		// A literal `tools:` section in the security file is discarded. `Tools` is
+		// inlined, so the readable sections are `web` and `skills` at the top level and
+		// `tools` is not one of them; the migration pre-merge then assigns
+		// `m2["tools"] = m3` wholesale, so anything the file put under `tools` is
+		// overwritten rather than merged. `ghp_from_tools` does not reach the registry,
+		// while `ghp_mig` in the case above does -- which is what makes this a test of
+		// the assignment and not of the unmarshal. A port that extends instead of
+		// replacing writes a second credential the shipped binary never reads.
+		configCase("migration_security_tools_section_is_dropped",
+			cfgWrite("config.json", `{"version":1}`),
+			cfgWrite(".security.yml", "tools:\n    skills:\n        github:\n"+
+				"            token: ghp_from_tools\nweb:\n    brave:\n        api_keys: [bk]\n"),
+			cfgLoad("config.json")),
+
 		// ---------------------------------------------------------------- the pair --
 		//
 		// .security.yml is the yaml-tagged half and the JSON document is the rest;
@@ -777,6 +1264,105 @@ func configCases() []fixtureCase {
 		configCase("a_string_in_a_secure_string_channel_setting_loads",
 			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
 				`"type":"telegram","settings":{"token":"hunter2"}}}}`),
+			cfgLoad("config.json")),
+
+		// ------------------------------------------------ channel-list validators
+		// The tail of InitChannelList is two validators (config_channel.go:753 and :761),
+		// and no case above reaches either: they fire only on a shape none of those files
+		// uses. Both are worth pinning because each refuses a config a plausible port
+		// would happily load -- and because a corpus of refusals alone proves nothing: a
+		// failed case records error_op_index and no message, so a port that refuses the
+		// file for an entirely wrong reason replays green. Every refusal below therefore
+		// has a neighbouring acceptance that a wrong rule breaks.
+
+		// validateChannelStreamingConfig: a negative streaming bound is refused. The
+		// check runs on the **decoded typed struct**, not on the stored map, so it is
+		// reached only after InitChannelList's Decode -- a port that validates the stored
+		// keys before decoding is looking at a different document.
+		configCaseErr("negative_streaming_throttle_seconds_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true,"throttle_seconds":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// The sibling field, refused by its own comparison rather than a shared "any
+		// negative number" rule: with only one of the two present, a port that checks
+		// throttle alone replays green.
+		configCaseErr("negative_streaming_min_growth_chars_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true,"min_growth_chars":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// Zero is legal on both, which is what makes the two above about the sign and not
+		// about the field being present at all.
+		configCase("zero_streaming_bounds_load",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true,"throttle_seconds":0,`+
+				`"min_growth_chars":0}}}}}`),
+			cfgLoad("config.json")),
+
+		// The switch that decides *which* channels are checked at all
+		// (config_channel.go:793-802) names PicoSettings, TelegramSettings and
+		// WeComSettings. These two refusals and the acceptance below are what pin that
+		// membership: without them a port that validates any settings node carrying a
+		// "streaming" key refuses a file Go accepts, and a port that hardcodes telegram
+		// accepts a file Go refuses.
+		configCaseErr("negative_streaming_bounds_are_refused_on_pico", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"assistant":{"enabled":true,`+
+				`"type":"pico","settings":{"streaming":{"throttle_seconds":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("negative_streaming_bounds_are_refused_on_wecom", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"wecom1":{"enabled":true,`+
+				`"type":"wecom","settings":{"streaming":{"min_growth_chars":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// And the other side of the switch's default arm: maixcam has no streaming field
+		// at all, so the key is dropped when the struct is marshalled and the validator
+		// never looks. A port that treats "the file has a streaming key" as the trigger
+		// rejects this file.
+		configCase("streaming_on_a_type_without_the_field_is_dropped_not_refused",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"maixcam":{"enabled":true,`+
+				`"settings":{"streaming":{"throttle_seconds":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// validateSingletonChannels: a singleton type allows one **enabled** instance.
+		// The count is keyed on the resolved type, so two differently-named channels of
+		// the same singleton type is what a user hits by adding a second pico channel
+		// and expecting it to work.
+		configCaseErr("two_enabled_channels_of_a_singleton_type_are_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico1":{"enabled":true,`+
+				`"type":"pico"},"pico2":{"enabled":true,"type":"pico"}}}`),
+			cfgLoad("config.json")),
+
+		// Disabled channels are not counted (`if !bc.Enabled { continue }`), so a second
+		// instance is fine switched off. Without this case a port that counts entries
+		// rather than enabled entries refuses a working config.
+		configCase("a_disabled_second_singleton_channel_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico1":{"enabled":true,`+
+				`"type":"pico"},"pico2":{"enabled":false,"type":"pico"}}}`),
+			cfgLoad("config.json")),
+
+		// The registry is what makes this a rule about types rather than about channels:
+		// discord is not registered as a singleton, so two enabled discord channels load
+		// and the refusal above cannot be generalised to "one channel per type".
+		configCase("two_enabled_channels_of_a_shared_non_singleton_type_load",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"d1":{"enabled":true,`+
+				`"type":"discord"},"d2":{"enabled":true,"type":"discord"}}}`),
+			cfgLoad("config.json")),
+
+		// The second registered singleton type, so the registry is pinned as a set and
+		// not as one name. It needs its own acceptance first: unlike pico, telegram and
+		// wecom, `pico_client` is not in the default channel list, so without this case
+		// the refusal below would also be satisfied by a port that simply does not know
+		// the type -- and the corpus cannot tell those two refusals apart.
+		configCase("a_single_pico_client_channel_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pc1":{"enabled":true,`+
+				`"type":"pico_client"}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("two_enabled_pico_client_channels_are_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pc1":{"enabled":true,`+
+				`"type":"pico_client"},"pc2":{"enabled":true,"type":"pico_client"}}}`),
 			cfgLoad("config.json")),
 	}
 }
