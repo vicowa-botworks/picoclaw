@@ -1478,5 +1478,101 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":3,"channel_list":{"pc1":{"enabled":true,`+
 				`"type":"pico_client"},"pc2":{"enabled":true,"type":"pico_client"}}}`),
 			cfgLoad("config.json")),
+
+		// FlexibleStringSlice (config_struct.go:22) is a []string whose UnmarshalJSON also
+		// accepts a bare string, a bare number, and a mixed array -- its own doc comment says
+		// it exists "so allow_from can contain both "123" and 123". The coercion is not a
+		// no-op on the bytes: `"alice"` comes back as `["alice"]` and `123456789` as
+		// `["123456789"]`, so a port that merely *accepts* a scalar and keeps it disagrees
+		// with the recorded value. Inside an array each element is formatted on its own, and
+		// the two arms differ: a number goes through `%.0f`, which rounds half to even (1.5
+		// and 2.5 both print "2") and keeps the sign of a value that rounds to zero (-0.4
+		// prints "-0"), while anything else goes through `%v` -- so a bool is "true" and an
+		// object is Go's map syntax, "map[a:1]".
+		//
+		// The reachable load-side sites are Channel.allow_from (every channel type,
+		// `omitempty` only) and the FlexibleStringSlice fields inside channel settings, which
+		// the last case shows: `channels: "picoclaw"` and `request_caps: 9` both arrive as
+		// one-element lists through the JSON decoder that settings go through.
+		configCase("a_flexible_string_slice_from_a_bare_string",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","allow_from":"alice"}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_flexible_string_slice_from_a_bare_number",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","allow_from":123456789}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_flexible_string_slice_from_a_mixed_array",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","allow_from":["alice",123]}}}`),
+			cfgLoad("config.json")),
+
+		// The two formatting arms side by side, because the distinction is invisible in either
+		// half alone: `%.0f` for a number, `%v` for everything else. Recorded as
+		// ["2", "2", "-0", "true", "map[a:1]"].
+		configCase("a_flexible_string_slice_formats_its_elements_individually",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","allow_from":[1.5,2.5,-0.4,true,{"a":1}]}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_flexible_string_slice_inside_a_channels_settings",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"irc":{"enabled":true,`+
+				`"type":"irc","settings":{"channels":"picoclaw","request_caps":9}}}}`),
+			cfgLoad("config.json")),
+
+		// A `registries:` section left empty in a security file is not the same file as one
+		// that omits it. Recorded, with the document carrying a `custom` registry:
+		//
+		// | the section | the registries that load |
+		// |---|---|
+		// | `registries:` (null) | `clawhub` and `github`, both `enabled: false` and `base_url: ""`; `custom` gone |
+		// | `registries: {}` | all three, enabled, with their base URLs |
+		// | `registries: []` | byte-identical to `{}` |
+		//
+		// So a null replaces the slice -- yaml decodes `!!null` into a nil slice, and the
+		// builtin pass then materialises the two builtins as zero values rather than as
+		// defaults -- while an empty mapping or sequence leaves it alone. A port that reads an
+		// empty section as "nothing to do" gets rows two and three right and row one wrong,
+		// and wrong in the direction that silently disables a user's registries.
+		configCase("a_null_registries_section_in_the_security_file",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
+				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n"),
+			cfgLoad("config.json")),
+
+		configCase("an_empty_mapping_registries_section_in_the_security_file",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
+				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    registries: {}\n"),
+			cfgLoad("config.json")),
+
+		configCase("an_empty_sequence_registries_section_in_the_security_file",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
+				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    registries: []\n"),
+			cfgLoad("config.json")),
+
+		configCase("a_null_registries_section_beside_a_legacy_registry_key",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
+				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n    legacy_k:\n"+
+				"      token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// Neither this nor the null case above gets its legacy key lifted, and that is a rule of
+		// its own rather than collateral from the wipe: here nothing is wiped -- the document's
+		// `custom` and both builtins survive with their base URLs -- and `legacy_k` is still
+		// absent. So naming `registries` at all, whatever its value, switches the deprecated
+		// top-level lift off. The reviewer's table expected `legacy_k` to be created beside a
+		// null; Go's bytes say otherwise, and this half is what rules out the other
+		// explanation, that the wipe ran after the lift and took the new registry with it.
+		configCase("an_empty_mapping_registries_section_beside_a_legacy_registry_key",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
+				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    registries: {}\n    legacy_k:\n"+
+				"      token: ghp_legacy\n"),
+			cfgLoad("config.json")),
 	}
 }
