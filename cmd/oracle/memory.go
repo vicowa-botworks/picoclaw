@@ -1125,13 +1125,16 @@ func memoryCases() []fixtureCase {
 		// reading the alias history from aliasMeta.Skip -- because both were
 		// found the only reliable way, by a fault that survived.
 		//
-		// One branch is deliberately missing. The rollback in
-		// promoteAliasHistoryLocked -- restoreRawJSONL after writeMeta fails --
-		// is not reachable through the public API: every way of making the meta
-		// write refuse (a directory at the .meta.json path, an over-long key)
-		// makes the readMeta of that same path refuse first, and the read happens
-		// before anything is written. So the rollback is fidelity-only in the
-		// Rust port and cannot be pinned here.
+		// An earlier version of this comment claimed the rollback in
+		// promoteAliasHistoryLocked -- restoreRawJSONL after writeMeta fails -- was
+		// unreachable through the public API, because every way of making the meta
+		// write refuse (a directory at the .meta.json path, an over-long key) makes
+		// the readMeta of that same path refuse first. That reasoning only covered
+		// ways of breaking the *file*. A meta file whose created_at parses but
+		// cannot be marshalled breaks the *encoder* instead, so readMeta succeeds and
+		// writeMeta is the call that fails -- exactly the family compact already
+		// pins. The two rollback branches are therefore pinned below, and the code
+		// was already right; it was the disclosure that was wrong.
 		memoryCase("promote_alias_moves_the_alias_history",
 			stepAddSimple("a1", "user", "from alias"),
 			stepAddSimple("a1", "assistant", "reply"),
@@ -1301,6 +1304,89 @@ func memoryCases() []fixtureCase {
 					"  \"updated_at\": \"2020-01-02T03:04:05Z\"\n}"),
 			stepAddSimple("a1", "user", "from alias"),
 			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1")),
+		// isMainSessionAlias matches the opaque form against three digests --
+		// "main", "Main" and "MAIN" -- and the case above only carries the first.
+		// A port that reproduces one digest and guesses the others ships green, and
+		// a wrong digest fails silently in the dangerous direction: main's shared
+		// history is swallowed into whichever channel session is being promoted.
+		// Both remaining spellings are skipped, so neither file is touched and only
+		// a1 moves.
+		//
+		//	sk_v1_e8044f66... == sha256("agent:Main:main")  skipped
+		//	sk_v1_0af0bb0b... == sha256("agent:MAIN:main")  skipped
+		memoryCase("promote_alias_skips_every_capitalisation_of_the_opaque_main_alias",
+			stepAddSimple("sk_v1_e8044f662bdbc14fcd4e9e9fddd2d8684be8672353e8e4a12b4ecd2e4a285acd",
+				"user", "capital-M fallback"),
+			stepAddSimple("sk_v1_0af0bb0be2edd17dea0e095305417ca89baad70bf936958ca4d6475f9f55d42a",
+				"user", "all-caps fallback"),
+			stepAddSimple("a1", "user", "from alias"),
+			stepPromoteAlias("s1", "", []string{
+				"sk_v1_e8044f662bdbc14fcd4e9e9fddd2d8684be8672353e8e4a12b4ecd2e4a285acd",
+				"sk_v1_0af0bb0be2edd17dea0e095305417ca89baad70bf936958ca4d6475f9f55d42a",
+				"a1"}),
+			stepGetHistory("sk_v1_e8044f662bdbc14fcd4e9e9fddd2d8684be8672353e8e4a12b4ecd2e4a285acd"),
+			stepGetHistory("sk_v1_0af0bb0be2edd17dea0e095305417ca89baad70bf936958ca4d6475f9f55d42a"),
+			stepGetHistory("s1")),
+		// count comes from the alias history, not from the canonical's own metadata.
+		// Every other promotion case has a canonical whose count is already 0, so
+		// "copy the alias count", "add the alias length to the canonical count" and
+		// "leave the canonical count alone" all agree everywhere else -- a mutation
+		// run proved the accumulate variant survived all 95 cases. Here the metadata
+		// says 9 while the file holds nothing visible, which is a state a crash
+		// really does leave behind, and Go writes 1.
+		memoryCase("promote_alias_counts_the_alias_history_not_the_canonical_meta",
+			stepWriteFile("s1.jsonl", "\n"),
+			stepWriteFile("s1.meta.json",
+				"{\"key\":\"s1\",\"summary\":\"\",\"skip\":0,\"count\":9,"+
+					"\"created_at\":\"2020-01-02T03:04:05Z\","+
+					"\"updated_at\":\"2020-01-02T03:04:05Z\"}"),
+			stepAddSimple("a1", "user", "one"),
+			stepPromoteAlias("s1", "", []string{"a1"}),
+			stepGetMeta("s1")),
+		// The rollback in promoteAliasHistoryLocked is reachable after all: a meta
+		// file whose created_at parses but cannot be marshalled makes readMeta
+		// succeed and writeMeta fail, which is the family compact already pins with
+		// the same -24:00 offset. PromoteAliasHistory therefore returns an error, and
+		// what separates the two rollback branches is the directory -- restoreRawJSONL
+		// has to distinguish "there was no file" from "there was an empty one", and
+		// only the presence of s1.jsonl says which. Nothing is recorded as a result:
+		// the run stops at the refusal, so {files} IS the assertion.
+		memoryCaseErr("promote_alias_rollback_removes_a_jsonl_it_created", "promote_alias",
+			stepAddSimple("a1", "user", "from alias"),
+			stepWriteFile("s1.meta.json",
+				"{\"key\":\"s1\",\"count\":0,\"skip\":0,"+
+					"\"created_at\":\"0001-01-01T00:00:00-24:00\"}"),
+			stepPromoteAlias("s1", "", []string{"a1"})),
+		memoryCaseErr("promote_alias_rollback_restores_the_previous_bytes", "promote_alias",
+			stepAddSimple("a1", "user", "from alias"),
+			stepWriteFile("s1.jsonl", "\n"),
+			stepWriteFile("s1.meta.json",
+				"{\"key\":\"s1\",\"count\":0,\"skip\":0,"+
+					"\"created_at\":\"0001-01-01T00:00:00-24:00\"}"),
+			stepPromoteAlias("s1", "", []string{"a1"})),
+		// time.Time.IsZero tests the absolute instant and never consults the
+		// location, so 0001-01-01T01:00:00+01:00 IS the zero time -- and so is
+		// 23:00+23:00, while 00:00-24:00 is not. A port that compares the printed
+		// fields instead of the instant reports this as a real timestamp, which is
+		// visible twice over: the described meta says null because Go's omitempty
+		// fires on a zero time, and addMsg stamps it because its guard fires. The
+		// input is a hand-edited or older-version meta file, which is the exact
+		// population meta_timestamp_written_by_hand_is_pinned exists for.
+		memoryCase("meta_zero_in_a_non_utc_zone_reads_as_zero",
+			stepWriteFile("s1.jsonl", ""),
+			stepWriteFile("s1.meta.json",
+				"{\"key\":\"s1\",\"count\":0,\"skip\":0,"+
+					"\"created_at\":\"0001-01-01T01:00:00+01:00\","+
+					"\"updated_at\":\"0001-01-01T23:00:00+23:00\"}"),
+			stepGetMeta("s1")),
+		memoryCase("meta_zero_in_a_non_utc_zone_is_stamped_by_a_write",
+			stepWriteFile("s1.jsonl", ""),
+			stepWriteFile("s1.meta.json",
+				"{\"key\":\"s1\",\"count\":0,\"skip\":0,"+
+					"\"created_at\":\"0001-01-01T01:00:00+01:00\","+
+					"\"updated_at\":\"0001-01-01T01:00:00+01:00\"}"),
+			stepAddSimple("s1", "user", "first"),
 			stepGetMeta("s1")),
 		memoryCase("set_history_stamps_missing_timestamps",
 			stepSetHistory("s1", protocoltypes.Message{Role: "user", Content: "x"}),
