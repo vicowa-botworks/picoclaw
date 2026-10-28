@@ -1265,5 +1265,104 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
 				`"type":"telegram","settings":{"token":"hunter2"}}}}`),
 			cfgLoad("config.json")),
+
+		// ------------------------------------------------ channel-list validators
+		// The tail of InitChannelList is two validators (config_channel.go:753 and :761),
+		// and no case above reaches either: they fire only on a shape none of those files
+		// uses. Both are worth pinning because each refuses a config a plausible port
+		// would happily load -- and because a corpus of refusals alone proves nothing: a
+		// failed case records error_op_index and no message, so a port that refuses the
+		// file for an entirely wrong reason replays green. Every refusal below therefore
+		// has a neighbouring acceptance that a wrong rule breaks.
+
+		// validateChannelStreamingConfig: a negative streaming bound is refused. The
+		// check runs on the **decoded typed struct**, not on the stored map, so it is
+		// reached only after InitChannelList's Decode -- a port that validates the stored
+		// keys before decoding is looking at a different document.
+		configCaseErr("negative_streaming_throttle_seconds_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true,"throttle_seconds":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// The sibling field, refused by its own comparison rather than a shared "any
+		// negative number" rule: with only one of the two present, a port that checks
+		// throttle alone replays green.
+		configCaseErr("negative_streaming_min_growth_chars_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true,"min_growth_chars":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// Zero is legal on both, which is what makes the two above about the sign and not
+		// about the field being present at all.
+		configCase("zero_streaming_bounds_load",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","settings":{"streaming":{"enabled":true,"throttle_seconds":0,`+
+				`"min_growth_chars":0}}}}}`),
+			cfgLoad("config.json")),
+
+		// The switch that decides *which* channels are checked at all
+		// (config_channel.go:793-802) names PicoSettings, TelegramSettings and
+		// WeComSettings. These two refusals and the acceptance below are what pin that
+		// membership: without them a port that validates any settings node carrying a
+		// "streaming" key refuses a file Go accepts, and a port that hardcodes telegram
+		// accepts a file Go refuses.
+		configCaseErr("negative_streaming_bounds_are_refused_on_pico", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"assistant":{"enabled":true,`+
+				`"type":"pico","settings":{"streaming":{"throttle_seconds":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("negative_streaming_bounds_are_refused_on_wecom", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"wecom1":{"enabled":true,`+
+				`"type":"wecom","settings":{"streaming":{"min_growth_chars":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// And the other side of the switch's default arm: maixcam has no streaming field
+		// at all, so the key is dropped when the struct is marshalled and the validator
+		// never looks. A port that treats "the file has a streaming key" as the trigger
+		// rejects this file.
+		configCase("streaming_on_a_type_without_the_field_is_dropped_not_refused",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"maixcam":{"enabled":true,`+
+				`"settings":{"streaming":{"throttle_seconds":-1}}}}}`),
+			cfgLoad("config.json")),
+
+		// validateSingletonChannels: a singleton type allows one **enabled** instance.
+		// The count is keyed on the resolved type, so two differently-named channels of
+		// the same singleton type is what a user hits by adding a second pico channel
+		// and expecting it to work.
+		configCaseErr("two_enabled_channels_of_a_singleton_type_are_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico1":{"enabled":true,`+
+				`"type":"pico"},"pico2":{"enabled":true,"type":"pico"}}}`),
+			cfgLoad("config.json")),
+
+		// Disabled channels are not counted (`if !bc.Enabled { continue }`), so a second
+		// instance is fine switched off. Without this case a port that counts entries
+		// rather than enabled entries refuses a working config.
+		configCase("a_disabled_second_singleton_channel_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico1":{"enabled":true,`+
+				`"type":"pico"},"pico2":{"enabled":false,"type":"pico"}}}`),
+			cfgLoad("config.json")),
+
+		// The registry is what makes this a rule about types rather than about channels:
+		// discord is not registered as a singleton, so two enabled discord channels load
+		// and the refusal above cannot be generalised to "one channel per type".
+		configCase("two_enabled_channels_of_a_shared_non_singleton_type_load",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"d1":{"enabled":true,`+
+				`"type":"discord"},"d2":{"enabled":true,"type":"discord"}}}`),
+			cfgLoad("config.json")),
+
+		// The second registered singleton type, so the registry is pinned as a set and
+		// not as one name. It needs its own acceptance first: unlike pico, telegram and
+		// wecom, `pico_client` is not in the default channel list, so without this case
+		// the refusal below would also be satisfied by a port that simply does not know
+		// the type -- and the corpus cannot tell those two refusals apart.
+		configCase("a_single_pico_client_channel_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pc1":{"enabled":true,`+
+				`"type":"pico_client"}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("two_enabled_pico_client_channels_are_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pc1":{"enabled":true,`+
+				`"type":"pico_client"},"pc2":{"enabled":true,"type":"pico_client"}}}`),
+			cfgLoad("config.json")),
 	}
 }
