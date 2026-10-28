@@ -92,6 +92,22 @@ type node struct {
 	// SettingsSchemas is set on the Channel node only: channel type -> the struct its
 	// settings decode into, with that struct's yaml and json emission lists.
 	SettingsSchemas map[string]*node `json:"settings_schemas,omitempty"`
+	// SingletonChannelTypes is set on the Channel node only: the singleton registry,
+	// read off the package's own `registerSingletonChannel` calls and resolved through
+	// the channel-type constants. validateSingletonChannels counts enabled channels per
+	// type against exactly this set, and the registry is built at init() time by calls
+	// scattered through the package -- there is no literal to copy, which is why the port
+	// cannot know it without the dump.
+	SingletonChannelTypes []string `json:"singleton_channel_types,omitempty"`
+	// StreamingValidated marks a settings struct that validateChannelStreamingConfig
+	// names in its type switch, so its `streaming` bounds are checked. It is a flag on
+	// the settings node rather than a list of channel types because the switch is written
+	// over structs: the function's default arm returns nil, so a channel whose settings
+	// struct is not named there loads any bounds the file carries. Measured, and the
+	// agreement with "has a streaming field" is exact today -- but the switch is the
+	// source, and a struct that grows a streaming field without joining the switch is a
+	// change the flag follows and a derived rule would not.
+	StreamingValidated bool `json:"streaming_validated,omitempty"`
 	// JSONMarshaler says this type declares its own `MarshalJSON()`, so the bytes that
 	// go out are whatever that method returns and `json_fields` is at best the shape it
 	// usually builds from. Read it as "do not write this node from json_fields alone".
@@ -188,6 +204,17 @@ type ctx struct {
 	// consts resolves the factory's keys, which are named constants (ChannelTelegram)
 	// rather than string literals.
 	consts map[string]string
+	// singletonRefs is every `registerSingletonChannel` argument in the package, kept as
+	// the parsed expression because the constants it names may be declared in a file the
+	// loop has not reached yet. Resolved once the whole directory has been read.
+	singletonRefs []ast.Expr
+	// singletonTypes is singletonRefs resolved and sorted: the registry
+	// validateSingletonChannels counts against.
+	singletonTypes []string
+	// streamingChecked is the type switch inside validateChannelStreamingConfig: the
+	// settings structs whose streaming bounds are validated. Everything else takes the
+	// function's default arm.
+	streamingChecked map[string]bool
 	// cache stops a recursive type from being walked twice, and makes a cycle
 	// terminate: a self-referential struct gets a scalar placeholder the second
 	// time, which is what reflect would report as the same shape anyway.
@@ -278,15 +305,16 @@ func main() {
 	dir := os.Args[1]
 	fset := token.NewFileSet()
 	c := &ctx{
-		fset:           fset,
-		structs:        map[string]*ast.StructType{},
-		aliases:        map[string]ast.Expr{},
-		named:          map[string]bool{},
-		consts:         map[string]string{},
-		settingsTypes:  map[string]string{},
-		cache:          map[string]*node{},
-		yamlMarshalers: map[string]bool{},
-		jsonMarshalers: map[string]bool{},
+		fset:             fset,
+		structs:          map[string]*ast.StructType{},
+		aliases:          map[string]ast.Expr{},
+		named:            map[string]bool{},
+		consts:           map[string]string{},
+		streamingChecked: map[string]bool{},
+		settingsTypes:    map[string]string{},
+		cache:            map[string]*node{},
+		yamlMarshalers:   map[string]bool{},
+		jsonMarshalers:   map[string]bool{},
 	}
 
 	files, err := os.ReadDir(dir)
@@ -303,6 +331,47 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		// Two pieces of loader behaviour live in code rather than in a literal, and both
+		// are things the port has to know exactly:
+		//
+		//   - the singleton registry. Each channel type calls registerSingletonChannel
+		//     from an init(), so there is no map to read off; the call sites are the
+		//     registry. Their arguments are kept unresolved (see singletonRefs) because
+		//     the constant may be declared in a file this loop has not reached.
+		//   - the streaming validator's type switch. validateChannelStreamingConfig
+		//     checks the bounds only for the structs its switch names and returns nil
+		//     for every other settings struct, so "which channels are checked" is a fact
+		//     about that function, not about which structs happen to declare a field.
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch nd := n.(type) {
+			case *ast.CallExpr:
+				if fn, ok := nd.Fun.(*ast.Ident); ok && fn.Name == "registerSingletonChannel" && len(nd.Args) == 1 {
+					c.singletonRefs = append(c.singletonRefs, nd.Args[0])
+				}
+			case *ast.FuncDecl:
+				if nd.Name.Name != "validateChannelStreamingConfig" || nd.Body == nil {
+					return true
+				}
+				for _, stmt := range nd.Body.List {
+					sw, ok := stmt.(*ast.TypeSwitchStmt)
+					if !ok {
+						continue
+					}
+					for _, clause := range sw.Body.List {
+						cc, ok := clause.(*ast.CaseClause)
+						if !ok {
+							continue
+						}
+						for _, t := range cc.List {
+							if name := strings.TrimPrefix(typeString(t), "*"); name != "" {
+								c.streamingChecked[name] = true
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
 		for _, decl := range f.Decls {
 			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.CONST {
 				for _, spec := range gen.Specs {
@@ -378,6 +447,25 @@ func main() {
 		}
 	}
 
+	// The singleton registry, resolved now that every constant in the package is known.
+	// Sorted because the dump is embedded and compared byte for byte: the call order is
+	// an artifact of which file the init() sits in.
+	seenSingleton := map[string]bool{}
+	for _, arg := range c.singletonRefs {
+		name := constName(arg, c.consts)
+		if name == "" {
+			// A registration this cannot resolve would silently shrink the registry, and
+			// the port would then accept two enabled channels of a type Go refuses.
+			fmt.Fprintf(os.Stderr, "registerSingletonChannel: cannot resolve argument %s\n", typeString(arg))
+			os.Exit(1)
+		}
+		if !seenSingleton[name] {
+			seenSingleton[name] = true
+			c.singletonTypes = append(c.singletonTypes, name)
+		}
+	}
+	sort.Strings(c.singletonTypes)
+
 	root, ok := c.structs[os.Args[2]]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "no struct %s in %s\n", os.Args[2], dir)
@@ -400,6 +488,7 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 		Marshaler: c.yamlMarshalers[name], JSONMarshaler: c.jsonMarshalers[name]}
 	if name == "Channel" {
 		out.BaseFields = c.baseFields
+		out.SingletonChannelTypes = c.singletonTypes
 		// Each channel type's settings struct, walked with its own yaml table. This is
 		// the only place the security writer learns that `telegram` answers to
 		// TelegramSettings -- the field's own type is RawNode, so nothing in the type
@@ -411,6 +500,11 @@ func (c *ctx) structNode(name string, st *ast.StructType, depth int) *node {
 			}
 			out.SettingsSchemas[chanType] = c.nodeFor(ast.NewIdent(settingsName), depth)
 		}
+	}
+	if c.streamingChecked[name] {
+		// Reached through SettingsSchemas, so the flag lands on the settings node a
+		// channel of that type decodes into.
+		out.StreamingValidated = true
 	}
 	if depth > 0 {
 		c.cache[name] = out
