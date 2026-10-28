@@ -1504,6 +1504,12 @@ func configCases() []fixtureCase {
 				`"type":"telegram","allow_from":123456789}}}`),
 			cfgLoad("config.json")),
 
+		// A non-unique witness, stated so the next reader does not hunt for the fault it is
+		// the only one for: its fault set is a subset of the formats case below. The one thing
+		// it carries that that case lacks is a *string* element beside a number, and deleting
+		// the loop's `case string:` moves nothing -- the failover renders a string
+		// identically. Keep it because it is the payload the type's own doc comment names and
+		// the fixture is what the port replays; do not read it as pinning a rule.
 		configCase("a_flexible_string_slice_from_a_mixed_array",
 			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
 				`"type":"telegram","allow_from":["alice",123]}}}`),
@@ -1536,6 +1542,14 @@ func configCases() []fixtureCase {
 		// defaults -- while an empty mapping or sequence leaves it alone. A port that reads an
 		// empty section as "nothing to do" gets rows two and three right and row one wrong,
 		// and wrong in the direction that silently disables a user's registries.
+		//
+		// What these three cases cannot do: no fault *in this tree* touches the
+		// replace-on-null rule. yaml.v3 zeroes a slice target for a `!!null` node before
+		// `SkillsRegistriesConfig.UnmarshalYAML` is reached -- the same short-circuit that makes
+		// a null `SecureString` keep what it held, arriving at the opposite result because the
+		// kind differs. So the cases pin the zero-value materialisation, correctly, and that is
+		// the in-tree half. The port's rule for a null section is replace, not merge, and only
+		// the port's own tests can hold that.
 		configCase("a_null_registries_section_in_the_security_file",
 			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
 				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
@@ -1548,6 +1562,12 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "skills:\n    registries: {}\n"),
 			cfgLoad("config.json")),
 
+		// In a fixture diff this is byte-identical to the `{}` case above and reads as a
+		// duplicate. It is not one: it is the corpus's only witness that the legacy pass skips
+		// `registries` *before* decoding it. Deleting the `|| name == "registries"` guard
+		// (`pkg/config/security.go:139`) moves this case and a pre-existing scalar case and
+		// nothing else, aborting with `cannot unmarshal !!seq into map[string]interface {}`;
+		// the `{}` case survives it, because an empty mapping decodes happily.
 		configCase("an_empty_sequence_registries_section_in_the_security_file",
 			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
 				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
@@ -1561,18 +1581,62 @@ func configCases() []fixtureCase {
 				"      token: ghp_legacy\n"),
 			cfgLoad("config.json")),
 
-		// Neither this nor the null case above gets its legacy key lifted, and that is a rule of
-		// its own rather than collateral from the wipe: here nothing is wiped -- the document's
-		// `custom` and both builtins survive with their base URLs -- and `legacy_k` is still
-		// absent. So naming `registries` at all, whatever its value, switches the deprecated
-		// top-level lift off. The reviewer's table expected `legacy_k` to be created beside a
-		// null; Go's bytes say otherwise, and this half is what rules out the other
-		// explanation, that the wipe ran after the lift and took the new registry with it.
+		// Neither this nor the null case above gets its legacy key lifted, and the reason is
+		// not the wipe and not the name `registries`: an entry under `skills:` is lifted iff it
+		// carries an `auth_token` (`pkg/config/security.go:158-162`). `SkillRegistryConfig`'s
+		// decoder reads `auth_token` by name (`config_struct.go:551`) and everything else --
+		// `token:` included -- falls through the `default:` arm into `Param`, which
+		// `MarshalJSON` writes back as a top-level plaintext key. So `token: ghp_legacy` leaves
+		// `AuthToken` empty and the lift `continue`s the entry before writing anything:
+		// `legacy_k` is absent rather than present-but-tokenless. Naming `registries`, whatever
+		// its value, does nothing to the lift -- the claim an earlier version of this comment
+		// made, which the case below falsifies.
 		configCase("an_empty_mapping_registries_section_beside_a_legacy_registry_key",
 			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
 				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
 			cfgWrite(".security.yml", "skills:\n    registries: {}\n    legacy_k:\n"+
 				"      token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// The case that makes the null pair discriminate. Both `beside_a_legacy_registry_key`
+		// cases above create nothing in either half, so neither can rule out "the wipe ran
+		// after the lift and took the new registry with it". Here a wipe and a lift happen in
+		// one file and the credential is spelled the way the lift reads it: `clawhub` and
+		// `github` come back zeroed, the document's `custom` is gone, and `legacy_k` is
+		// **created** at `enabled: false, base_url: ""`. So the order is wipe first, lift
+		// after -- which is exactly what a merge-order bug in a port gets wrong, in both
+		// directions: merging instead of replacing leaves `custom`, and lifting before the wipe
+		// deletes the registry the file just asked for.
+		configCase("a_null_registries_section_beside_a_legacy_key_with_a_credential",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":{"custom":`+
+				`{"enabled":true,"base_url":"https://custom.example"}}}}}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n    legacy_k:\n"+
+				"      auth_token: ghp_legacy\n"),
+			cfgLoad("config.json")),
+
+		// The lift copies `auth_token`, `base_url` and the `Param` keys -- never `Enabled`
+		// (`pkg/config/security.go:166` onward). So `enabled: true` on a legacy entry is
+		// dropped and the created registry is disabled, beside a `base_url` that does arrive.
+		// Unpinned until now, and a porter writing "legacy entry -> registry" field by field
+		// copies the flag and diverges on the one field that decides whether the registry is
+		// used at all.
+		configCase("a_legacy_registry_key_lifts_its_credential_but_not_enabled",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    legacy_k:\n"+
+				"      auth_token: ghp_legacy\n"+
+				"      base_url: https://legacy.example\n      enabled: true\n"),
+			cfgLoad("config.json")),
+
+		// The coercion routes a number through `float64`, so an integer past 2^53 is silently
+		// rewritten on the way to `%.0f`: `12345678901234567890` comes back as
+		// "12345678901234567168", both bare and inside an array. `123456789` is small enough to
+		// hide this entirely, and a serde-based port that keeps the integer exact is the most
+		// plausible way to disagree with Go here -- so this, not a second small number, is the
+		// case that holds the rule.
+		configCase("a_flexible_string_slice_past_2_pow_53_is_rewritten_through_float64",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"telegram":{"enabled":true,`+
+				`"type":"telegram","allow_from":[12345678901234567890,`+
+				`"12345678901234567890"]}}}`),
 			cfgLoad("config.json")),
 	}
 }
