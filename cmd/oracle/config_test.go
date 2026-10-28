@@ -48,9 +48,9 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 // assertion wearing different clothes: a case added without a re-pin moves both, and a
 // message that hardcodes the number goes stale the moment someone updates the check above
 // and only looks at that line.
-const wantConfigCaseCount = 84
+const wantConfigCaseCount = 96
 
-const wantConfigCorpusSHA = "0360a451d927ae34540c569d97c194aa560fda5b3ce745dc48bd26ea963a384a"
+const wantConfigCorpusSHA = "9e24b57869906e2492626d1a921363c7675800aeeedb2410345c896c847d09fe"
 
 // TestConfigCorpusIgnoresTheMachine is the part the digest above cannot prove on
 // its own: it runs the generator with the environment a real user would have and
