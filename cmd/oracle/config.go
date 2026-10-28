@@ -773,6 +773,76 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "skills: null\n"),
 			cfgLoad("config.json")),
 
+		// What a legacy registry token may be. `auth_token` is a SecureString, and yaml.v3
+		// short-circuits `!!null` for a type with a custom unmarshaler: it zeroes the target
+		// and never calls `UnmarshalYAML`. So an empty or explicit-null token leaves the
+		// SecureString empty, the legacy pass `continue`s before `Set`, and the registry is
+		// still created -- but with no `auth_token` in the rendering at all. A port that
+		// stringifies the node manufactures a credential the shipped binary does not have,
+		// and a blank legacy key then qualifies a registry.
+		configCase("security_legacy_empty_token_creates_no_credential",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        legacy_n:\n            auth_token:\n"),
+			cfgLoad("config.json")),
+
+		configCase("security_legacy_null_token_creates_no_credential",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        legacy_n2:\n            auth_token: null\n"),
+			cfgLoad("config.json")),
+
+		// A number is a printed scalar too, so it *does* become a token. Both faces are
+		// recorded because the pair is what makes the float attributable to the scalar's
+		// kind rather than to the field: `42` creates a registry, and `1.5` must too.
+		configCase("security_legacy_int_token_creates_a_credential",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        legacy_i:\n            auth_token: 42\n"),
+			cfgLoad("config.json")),
+
+		configCase("security_legacy_float_token_creates_a_credential",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "skills:\n    registries:\n        legacy_f:\n            auth_token: 1.5\n"),
+			cfgLoad("config.json")),
+
+		// `skills.github.token` in the security file *overwrites* the config's token; it does
+		// not fill it. Pass 1 is `yaml.Unmarshal(data, cfg)` and yaml decodes a struct field
+		// into the existing value, so `SecureString.UnmarshalYAML` assigns whatever the file
+		// says -- including nothing. These two cases are the only way to see the direction:
+		// with both sides non-empty the mask renders `[NOT_HERE]` either way, so an
+		// empty-in-the-file value is the third state that separates fill from overwrite.
+		configCase("security_github_document_token_null_with_a_file_entry",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":null}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        base_url: https://github.com\n"),
+			cfgLoad("config.json")),
+
+		configCase("security_github_file_token_empty_overwrites_the_documents",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":"ghp_doc"}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: \"\"\n"),
+			cfgLoad("config.json")),
+
+		// The other half: with the key absent the document's token survives, so the rule is
+		// "take the file's text when the key is present", not "take the file's text when it
+		// is non-empty".
+		configCase("security_github_file_token_absent_keeps_the_documents",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":"ghp_doc"}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        base_url: https://github.com\n"),
+			cfgLoad("config.json")),
+
+		// A security node whose kind disagrees with its target is a load failure, not an
+		// overwrite. `loadSecurityConfig` decodes the whole file into the typed `Config` with
+		// plain `yaml.Unmarshal`, so a scalar where a struct belongs and a map where a slice
+		// belongs are both unmarshal errors out of the decode -- the same stance the
+		// non-mapping `skills` refusals above take, and the reason a merge that "keeps the
+		// base" or "takes the overlay" on a kind mismatch is wrong in both directions.
+		configCaseErr("security_scalar_where_a_struct_belongs", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave: oops\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("security_map_where_a_sequence_belongs", 2,
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: {a: b}\n"),
+			cfgLoad("config.json")),
+
 		// A `.security.yml` is a secrets file, and Go enforces that with tags rather than
 		// with a filter: every field that is not a credential is `yaml:"-"` on the types
 		// the file can reach -- `Channel`'s whole base (`config_channel.go:224-231`), a
@@ -1024,6 +1094,35 @@ func configCases() []fixtureCase {
 		configCase("virtual_key_models_are_written_back_once",
 			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
 				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1","sk-2"]}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The multi-key expansion copies the model field by field, and Go names the fields in
+		// two different literals: `additionalEntry` (config.go:1802) never names `Fallbacks`,
+		// and only `primaryEntry` gets it assigned afterwards (config.go:1849,
+		// `append(fallbackNames, m.Fallbacks...)`). So the virtual copy carries no fallbacks
+		// at all while the primary carries the generated names *before* the user's own. A
+		// blocklist that excludes only `enabled` leaks the user's fallback list into every
+		// copy, and `fallbacks` is `omitempty` over a non-empty slice, so it is written: a
+		// byte difference in the loaded value of every failover-shaped model -- several keys
+		// *and* a model fallback, which is what a failover setup actually looks like.
+		configCase("virtual_key_model_copy_and_the_users_own_fallbacks",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"openrouter","model":"llama-3","api_keys":["sk-1","sk-2"],`+
+				`"fallbacks":["z"]}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The save writes both files from one document, and the registry token is the one
+		// value whose rendering differs between them: `.security.yml` gets the real secret,
+		// `config.json` keeps the `[NOT_HERE]` placeholder the marshaler writes. The plaintext
+		// `token` key beside it is Go's own leak -- `SkillRegistryConfig.MarshalJSON`
+		// hand-builds a map and re-emits every `Param` raw -- so it is pinned, not masked.
+		// This is the pair the unmask/remask dance exists for, pinned directly on a `save`
+		// op rather than through a migration's internal write.
+		configCase("security_registry_token_save_splits_masked_and_real",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":"ghp_doc"}}}}`),
+			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_file\n"),
 			cfgLoad("config.json"),
 			cfgSave("config.json")),
 
