@@ -1041,6 +1041,21 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "skills:\n    github:\n        token: ghp_mig\n"),
 			cfgLoad("config.json")),
 
+		// Only three sections of a config are readable from `.security.yml`:
+		// `channel_list`, `model_list` and `tools` (inlined, so it contributes `web` and
+		// `skills`). Everything else on `Config` is `yaml:"-"`, so a section the file
+		// spells in the JSON spelling -- or any section at all outside those three --
+		// is not merely unknown to the decoder, it is unreadable: `agents.defaults`
+		// keeps the empty string it had, and the key does not come back in either
+		// written file. A port that walks the JSON field list instead of the yaml one
+		// applies this section and diverges on every field inside it.
+		configCase("security_agents_section_is_not_readable_from_the_file",
+			cfgWrite("config.json", `{"version":3}`),
+			cfgWrite(".security.yml", "agents:\n    defaults:\n"+
+				"        modelname: from-security\n        bogus_key: keep_me\n"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
 		// A literal `tools:` section in the security file is discarded. `Tools` is
 		// inlined, so the readable sections are `web` and `skills` at the top level and
 		// `tools` is not one of them; the migration pre-merge then assigns
