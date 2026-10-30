@@ -1638,5 +1638,172 @@ func configCases() []fixtureCase {
 				`"type":"telegram","allow_from":[12345678901234567890,`+
 				`"12345678901234567890"]}}}`),
 			cfgLoad("config.json")),
+
+		// ------------------------------------------------------- legacy versions --
+		//
+		// Everything above this line is a version-3 document, which meant the whole
+		// migration arm of LoadConfig -- `case 0..=2` -- was graded by zero cases. The
+		// replay therefore could not see the pre-merge that makes a migration read a
+		// different document than the files on disk, and could not see that the
+		// migration *writes*: `SaveConfig` and `MakeBackup` both run inside the load, so
+		// the directory a case compares against is one the load itself rewrote.
+		// Recorded as rusty-crab#20.
+		//
+		// Two things every case here had to get right to be a witness at all. A valid
+		// legacy document needs `model_name` AND `model`: `ModelConfig.Validate`
+		// (pkg/config/config.go:839-844) requires both and runs before and after the
+		// ladder, so a document carrying only `model_name` dies with
+		// `model_list[0]: model is required` *after* the merge -- a probe bug, not a
+		// finding. And the loaded value is blind to every credential on this path,
+		// because `SecureStrings.IsZero` is true for any caller but the YAML encoder, so
+		// `encoding/json` never writes one: for the credential cases the discriminating
+		// bytes are in the `.security.yml` the migration rewrote, and each comment says
+		// which half carries the fact.
+		//
+		// Deliberately absent: a `version` 1 document, measured byte-identical to the
+		// `version` 2 case below in all three files, so it would witness the ladder
+		// twice and nothing else; and a security `model_list` naming one slot two ways
+		// (`m1:0:` and `m1:`), which Go decides by map order (migration.go:520) and
+		// would be a flaky case by construction.
+		configCase("a_version_two_document_is_migrated_and_rewritten",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgLoad("config.json")),
+
+		// Byte-identical to the case above in all three files, so it is not a second
+		// witness of the ladder -- it is the only witness that an *absent* `version` means
+		// "migrate" rather than "current". A port defaulting a missing version to
+		// `CurrentVersion` produces the same loaded value and the same config.json and
+		// simply never writes `config.json.<date>.bak`, so the file list is the whole
+		// assertion. That is also why the case above keeps its backup: the two together
+		// say the backup comes from the migration, not from the version number.
+		configCase("a_document_with_no_version_key_is_migrated",
+			cfgWrite("config.json", `{"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgLoad("config.json")),
+
+		// `MakeBackup` covers both files: `.security.yml.<date>.bak` appears here and not
+		// above, and it appears only when a security file existed to back up (Go's
+		// `MakeBackup` returns without writing when the source is missing). The rewritten
+		// `.security.yml` is byte-identical to the no-security-file case, so `tools: {}`
+		// contributes nothing beyond triggering the backup -- which is the point: this case
+		// is about the file list, not the contents, and a porter who diffs contents
+		// against the case above will read it as a duplicate.
+		configCase("a_legacy_document_backs_up_both_files_the_migration_rewrites",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "tools: {}\n"),
+			cfgLoad("config.json")),
+
+		// The four refusals below share one fact the fixture cannot say: a refused
+		// migration writes nothing. Each records `error_op_index` with `config.json` still
+		// holding `"version": 2` and the security file exactly as written, so a port that
+		// saves before it validates leaves a migrated file behind a load that failed. The
+		// Go text is not portable and a failing case records none, so the sentences are
+		// quoted here from measurement (one process per shape at origin/main) rather than
+		// from the corpus.
+		//
+		// Go's lift asks `m2[key] != nil` twice: once to decide whether it runs at all,
+		// and again **per key** inside it (migration.go:429, :433). A null-valued section
+		// therefore stays in the merged document, where the strict validator names it --
+		// `unknown field(s): web`. A lift that tests only presence loads this file.
+		configCaseErr("a_null_web_section_is_refused_for_a_legacy_document", 2,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "web:\n"),
+			cfgLoad("config.json")),
+
+		// The mixed shape, and the one that a one-level-too-high guard survives: the outer
+		// test is satisfied by the `skills` mapping, so the pass runs, and only the per-key
+		// test keeps the null `skills` out of the lift. Go refuses
+		// `unknown field(s): skills`; a port that lifts by presence loads it. This shape
+		// reached no case at all until now, which is why a wrong guard here replayed green
+		// through three review rounds.
+		configCaseErr("a_null_skills_section_beside_a_web_mapping_is_refused_for_a_legacy_document", 2,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\nskills:\n"),
+			cfgLoad("config.json")),
+
+		// Both null: the pass does not run at all and each key is named on its own
+		// (`unknown field(s): skills, web` in Go's map order, which the corpus records no
+		// text for and so does not pin). Included because it is the shape a hand-edited
+		// file with two bare section lines actually has, and because it is the only one of
+		// the three where an outer guard alone and an inner guard alone disagree about
+		// *what* gets refused -- here, nothing: both nulls are refused either way.
+		configCaseErr("two_null_security_sections_are_refused_for_a_legacy_document", 2,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "web:\nskills:\n"),
+			cfgLoad("config.json")),
+
+		// The same `!= nil` fact one level down. Inside the rewrite, a valueless
+		// `clawhub:` is nil, so Go's guard skips the rewrite *and* the `delete` inside it,
+		// leaving `clawhub` under `skills` for the validator to name
+		// (`unknown field(s): tools.skills.clawhub`). Give the same key a value --
+		// `clawhub: {token: ch}` -- and the rewrite moves it to `registries` and the file
+		// loads at both versions. So the refusal is about the null, not about the name, and
+		// a port that rewrites unconditionally refuses a file Go accepts while this one
+		// refuses a file Go refuses.
+		configCaseErr("a_valueless_clawhub_under_a_legacy_security_file_is_refused", 2,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "skills:\n    clawhub:\n"),
+			cfgLoad("config.json")),
+
+		// The pair, and the only one of these cases where the version number alone decides
+		// the answer. Same two files: at `version` 2 the file's `channel_list` reaches the
+		// loaded config -- `telegram.enabled` comes back **true**, overriding both the
+		// built-in default and a `false` the document carries -- and it merges per key at
+		// the channel level, so the document's other channels and the named channel's
+		// other fields survive. At `version` 3 the same section is **ignored**: `enabled`
+		// stays false, because the current-version security loader walks a narrow section
+		// allowlist that does not name `channel_list`. Measured one process per shape, and
+		// the reason the two cases sit adjacent: neither is a witness without the other.
+		// Note the second half, visible only in the files: at `version` 2 the rewritten
+		// `.security.yml` is byte-identical to a migration with no security file, so the
+		// channel setting is applied and then not written back.
+		configCase("a_legacy_security_channel_list_reaches_the_loaded_config",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        enabled: true\n"),
+			cfgLoad("config.json")),
+
+		configCase("a_current_security_channel_list_is_ignored",
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "channel_list:\n    telegram:\n        enabled: true\n"),
+			cfgLoad("config.json")),
+
+		// The file's credential wins and the document's is gone -- the rewritten
+		// `.security.yml` carries `sk-file` and no `sk-doc`, where the same migration with
+		// no security file writes `api_keys` nowhere at all. The loaded value shows
+		// neither: `model_list[0]` comes back as `model_name`, `provider` and `model` with
+		// no `api_keys` key, because `SecureStrings` is never marshalled by
+		// `encoding/json`. So this is a case whose assertion lives entirely in the file the
+		// migration wrote, and a port that grades only the loaded value cannot see which
+		// key won.
+		configCase("a_legacy_security_model_list_key_wins_over_the_documents",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o","api_keys":["sk-doc"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: [sk-file]\n"),
+			cfgLoad("config.json")),
+
+		// Same blindness, other section: the file's `brave.api_keys` is carried through the
+		// migration and re-emitted into the rewritten `.security.yml` (`brave:` with an
+		// `api_keys:` entry, where the no-security-file baseline writes `brave: {}`), while
+		// the loaded value reports `tools.web.brave.api_keys` as **null** and
+		// `tools.web.enabled` at its default. So a `web` credential can only be graded on
+		// the written file: a case read off the loaded value is structurally unable to see
+		// its own subject, and would report a key that survives as a key that is lost.
+		// That is also why the port's `web` merge gap (rusty-crab#16) could live in its
+		// ledger with no corpus case against it -- the one case that does grade it,
+		// `save_writes_back_a_web_key_from_the_security_file`, has to save before it can
+		// see anything.
+		configCase("a_legacy_security_web_key_survives_into_the_rewritten_file",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"),
+			cfgLoad("config.json")),
 	}
 }
