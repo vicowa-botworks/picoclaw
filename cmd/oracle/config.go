@@ -1805,5 +1805,50 @@ func configCases() []fixtureCase {
 				`"model":"openai/gpt-4o"}]}`),
 			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"),
 			cfgLoad("config.json")),
+
+		// -------------------------------------------------- secure-string shapes --
+		//
+		// A `SecureString`/`SecureStrings` field is the one place the corpus meets a type
+		// that refuses a number, and it refuses through two decoders that do not agree on
+		// what to say. Nothing here reached a case before, which is why the port loading
+		// these at defaults instead of refusing (rusty-crab#15) had no witness. Measured
+		// one process per shape at origin/main.
+		//
+		// The container and the leaf are different sentences: a number where the sequence
+		// itself belongs says `expected []*config.SecureString but got number`, a number
+		// inside the sequence says `expected string but got number`. A port that reports
+		// one message for both is wrong on one of them, and only the pair can show it.
+		configCaseErr("a_number_where_a_models_api_keys_sequence_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"m","api_keys":42}]}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_number_inside_a_models_api_keys_sequence_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"m","api_keys":[42]}]}`),
+			cfgLoad("config.json")),
+
+		// The pair that says `FlexibleStringSlice` is a named type and not a sequence
+		// rule. A bare string for a `[]string` field is coerced to one element -- that is
+		// what `allow_from: solo` does, and the flexible-slice cases above pin it. A bare
+		// string for a `SecureStrings` field is refused: `expected []*config.SecureString
+		// but got string`. So the coercion belongs to the type, not to "a sequence was
+		// asked for and a scalar arrived", and a port that puts the rule in the generic
+		// sequence arm accepts this file.
+		configCaseErr("a_bare_string_where_a_models_api_keys_sequence_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"m","api_keys":"sk-1"}]}`),
+			cfgLoad("config.json")),
+
+		// Same value, other decoder: in `.security.yml` the refusal is a yaml.v3 error
+		// naming the Go type -- cannot unmarshal !!int `42` into config.SecureStrings --
+		// wrapped as `failed to load security config`, not the strict-JSON type error
+		// above. Different failure surface, different message, different prefix, so it
+		// needs its own case even though the value is the same number in the same field.
+		configCaseErr("a_number_at_a_security_file_api_keys_field_is_refused", 2,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"m","api_keys":["sk-doc"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: 42\n"),
+			cfgLoad("config.json")),
 	}
 }
