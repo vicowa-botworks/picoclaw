@@ -172,7 +172,40 @@ func readProvenance(seed int64) provenance {
 	if p.Commit == "" {
 		p.Commit = "unknown"
 	}
+	p.Commit += dirtySuffix(p.Commit)
 	return p
+}
+
+// `dirtySuffix` returns "-dirty" when the working tree carries changes the stamped
+// commit does not.
+//
+// A commit stamp is provenance, and provenance that is quietly wrong costs someone
+// else an afternoon: `git rev-parse HEAD` taken over a dirty tree names a commit that
+// cannot have produced the file beside it (rusty-crab #14 -- the header declared a
+// tree with 44 config cases while the fixture held 53, so re-running the generator at
+// the stamped commit "proved" the fixture was stale when it was not).
+//
+// A suffix rather than a refusal, deliberately. Cases are written *inside* the
+// generator, so the ordinary loop is "edit cmd/oracle/config.go, regenerate, commit
+// the two together" -- a hard stop would make the corpus impossible to extend, and an
+// author told to stash-and-regenerate would stamp a tree that does not contain the new
+// cases, which is the same lie pointing the other way. The stamp goes clean on its
+// own: the commit that carries the cases is the commit that makes the tree clean, and
+// a `-dirty` stamp left in a committed fixture is a fact a reviewer can see.
+func dirtySuffix(commit string) string {
+	if commit == "" || commit == "unknown" {
+		return ""
+	}
+	// `--untracked-files=no`, because the question is whether the stamped commit
+	// describes the code that produced this file. A modified tracked file says it does
+	// not; a scratch file nobody has added says nothing either way, and counting it
+	// would stamp every generation `-dirty` in a tree that carries a build artefact.
+	out, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output()
+	if err != nil || len(strings.TrimSpace(string(out))) != 0 {
+		fmt.Fprintln(os.Stderr, "oracle: working tree is dirty, so source_commit is stamped -dirty")
+		return "-dirty"
+	}
+	return ""
 }
 
 func emit(p provenance, file, seam, note string, cases []fixtureCase, score func(fixtureCase) any) fixtureFile {
