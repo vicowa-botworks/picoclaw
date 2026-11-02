@@ -1850,5 +1850,143 @@ func configCases() []fixtureCase {
 				`"provider":"p","model":"m","api_keys":["sk-doc"]}]}`),
 			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: 42\n"),
 			cfgLoad("config.json")),
+
+		// ------------------------------------------------ validation inside the load --
+		//
+		// `LoadConfig` ends with two validators that no case reached: `ValidateTurnProfile`
+		// (config.go:1526) and `ValidateModelList` (config.go:1538), which delegates to
+		// `ModelConfig.Validate` (config.go:839). Both refuse a config rather than change
+		// one, and both run inside the load, so a port that omits them outright still
+		// returns a plausible `*Config` for every file the corpus held until now. Recorded
+		// as rusty-crab#17.
+		//
+		// Each case below was measured to refuse with the message naming its own mechanism
+		// (`model_list[0]: model is required`,
+		// `turn_profile.history.mode custom is not supported in this version`, ...), because
+		// the corpus records only THAT op 1 failed, not why -- a case whose failure came from
+		// an earlier stage would witness nothing. The messages are not in the fixture, so the
+		// comments are their only record here.
+		//
+		// Deliberately absent: a version-2 twin of any case below. A refused case records
+		// `error_op_index` and no other bytes, and `ModelConfig.Validate` runs both before
+		// and after the migration ladder (see the legacy section above), so the version
+		// cannot change what is recorded -- a v2 twin would be byte-identical to its control.
+		configCaseErr("a_model_entry_without_a_model_name_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"provider":"p","model":"m"}]}`),
+			cfgLoad("config.json")),
+
+		// The mirror of the case above, and the reason both are needed: `model_name` and
+		// `model` are separate requirements with separate messages, and the legacy section
+		// above found a document carrying only `model_name` die on `model is required` -- so
+		// a port that checks one field and not the other reproduces exactly that confusion.
+		configCaseErr("a_model_entry_without_a_model_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1","provider":"p"}]}`),
+			cfgLoad("config.json")),
+
+		// Three refusals on the SHAPE of `model`, none of which is a type error: the value is
+		// a perfectly good JSON string in every one. A port that validates presence only
+		// accepts all three files, and each of these identifiers reaches a provider URL or a
+		// cache key downstream, which is why Go rejects them at load rather than at use.
+		configCaseErr("a_model_identifier_with_whitespace_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"claude 3"}]}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_model_identifier_starting_with_a_slash_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"/anthropic.claude"}]}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_model_identifier_with_consecutive_slashes_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
+				`"provider":"p","model":"anthropic//claude"}]}`),
+			cfgLoad("config.json")),
+
+		// `tool_schema_transform` is a plain string in the struct, so the generic decoder
+		// accepts anything; `ModelConfig.Validate` is the only thing that knows the supported
+		// set, measured as `off` and `simple` (config.go:847 ->
+		// providercommon.NormalizeToolSchemaTransform). The refusal message names the set, so
+		// a port that hardcodes a different pair is wrong in a way a user sees verbatim.
+		configCaseErr("an_unknown_tool_schema_transform_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1","provider":"p",`+
+				`"model":"m","tool_schema_transform":"sideways"}]}`),
+			cfgLoad("config.json")),
+
+		// ------------------------------------------------------- turn profile --
+		//
+		// The four cases below are two pairs, and the pairs are the point. Each refusal is
+		// graded against an acceptance of the SAME value, so the case set says where the rule
+		// lives, not merely that it fires: `custom` is legal for `skills` and illegal for
+		// `history`/`system_prompt` (validateTurnProfileBlock's allowCustom argument), and
+		// every block is unchecked once `enabled` is false. A port that validates the mode
+		// uniformly across blocks, or that validates regardless of `enabled`, accepts a file
+		// Go rejects or rejects one Go loads, and only these pairs can tell it.
+		//
+		// The accepted cases are not empty either: the loaded document carries the mode it
+		// was given (`history: "custom"` on the disabled profile), so a port that normalises
+		// an unchecked mode to "default" on the way through changes the saved bytes too.
+		configCaseErr("a_turn_profile_asking_for_custom_history_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"agents":{"defaults":{"turn_profile":`+
+				`{"enabled":true,"history":{"mode":"custom"}}}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_turn_profile_asking_for_custom_system_prompt_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"agents":{"defaults":{"turn_profile":`+
+				`{"enabled":true,"system_prompt":{"mode":"custom"}}}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_turn_profile_in_custom_skills_mode_is_accepted",
+			cfgWrite("config.json", `{"version":3,"agents":{"defaults":{"turn_profile":`+
+				`{"enabled":true,"skills":{"mode":"custom","allow":["memory"]}}}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_disabled_turn_profile_does_not_validate_its_blocks",
+			cfgWrite("config.json", `{"version":3,"agents":{"defaults":{"turn_profile":`+
+				`{"enabled":false,"history":{"mode":"custom"}}}}}`),
+			cfgLoad("config.json")),
+
+		// A mode outside the three known values is a third failure, distinct from the
+		// `custom` refusals above: the message is `has unsupported mode`, and the value is
+		// refused even on a block where `custom` would be legal -- so a port that treats
+		// "unknown" as "default" (which is what `Effective()` does for the empty string)
+		// loads this file.
+		configCaseErr("a_turn_profile_with_an_unrecognised_mode_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"agents":{"defaults":{"turn_profile":`+
+				`{"enabled":true,"history":{"mode":"sometimes"}}}}}`),
+			cfgLoad("config.json")),
+
+		// --------------------------------------------- singleton type by channel name --
+		//
+		// The singleton cases from picoclaw#30 all set `type` explicitly, so they never
+		// reached the line that resolves it: `t := bc.Type; if t == "" { t = name }`
+		// (pkg/config/config_channel.go:518-521). Omitting `type` therefore makes the
+		// channel's *name* its type for every rule keyed on type -- both the singleton count
+		// and the known-type check. Two cases, plus the acceptance that makes the first one a
+		// witness rather than a coincidence.
+		//
+		// Measured refusal: `channel type "pico" is singleton and does not support multiple
+		// instances, found 2 enabled instances: [pico other]` -- the pair is one channel named
+		// `pico` with no type and one named `other` declaring `"type":"pico"`. A port that
+		// counts only declared types accepts this file, and the acceptance below is what stops
+		// the refusal from being satisfied by a port that rejects `pico` outright.
+		configCase("a_channel_named_for_a_singleton_type_without_a_type_loads",
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico":{"enabled":true}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_singleton_type_reached_by_two_routes_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico":{"enabled":true},`+
+				`"other":{"enabled":true,"type":"pico"}}}`),
+			cfgLoad("config.json")),
+
+		// The other half of the same fallback: with no `type`, the name has to *resolve*, and
+		// a name that is no registered type is refused -- `channel "pico2" has unknown type
+		// "pico2"`. So `type` is not "optional, defaults to something permissive"; it is
+		// required unless the name happens to be a type. This is a different rule from the
+		// count above and refuses for a different reason, and the corpus cannot see the
+		// difference (a refusal records only its op index), which is exactly why the name says
+		// which failure it is.
+		configCaseErr("a_channel_name_that_is_no_known_type_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":{"pico2":{"enabled":true}}}`),
+			cfgLoad("config.json")),
 	}
 }
