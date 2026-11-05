@@ -678,6 +678,66 @@ func configCases() []fixtureCase {
 				`{"github":{"enabled":true}}}}}`),
 			cfgLoad("config.json")),
 
+		// What the case above cannot say is what happens when the node is not a mapping at
+		// all, and until now no case had written one: every `registries` in the corpus is an
+		// object. The Rust side rested that arm on a unit test that states one verdict as if
+		// it were the whole rule. It is not: `SkillsRegistriesConfig` is a SLICE
+		// (`config.go:1164`) whose `UnmarshalJSON` (`config_struct.go:360`) tries a sequence
+		// FIRST and a mapping second, so there are three verdicts.
+		//
+		//   - A sequence is READ. Each element is probed for its `name`, cloned from the
+		//     existing entry of that name when there is one, decoded over that clone, and --
+		//     because the defaults already hold entries -- `Set` into the existing list
+		//     instead of replacing it.
+		//   - `null` takes that same sequence arm and decodes to an empty list, so it merges
+		//     nothing and the builtins stand. That verdict is a side effect, not a rule.
+		//   - A string fails both arms and REFUSES: `expected map[string]jsontext.Value but
+		//     got string`.
+		//
+		// So a port that generalises "not a mapping => leave the builtins alone" from the
+		// null loses the sequence form outright, and one that treats any non-mapping as a
+		// replacement accepts `"clawhub"`. `name` is what does the keying -- the same field
+		// the slice is written back out with (`schema_dump.go:243`, "a slice that writes an
+		// object"), which is why the mapping and the sequence spellings reach the same
+		// entries by different routes.
+		configCase("a_sequence_of_skill_registries_adds_the_entry_named_by_its_element",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":[{"name":`+
+				`"other"}]}}}`),
+			cfgLoad("config.json")),
+
+		// The clone-then-decode half of that arm. Naming a registry the defaults already
+		// carry must not rebuild it from scratch: `enabled: false` on its own therefore
+		// leaves `base_url` at `https://clawhub.ai`. This is the same merge the mapping arm
+		// performs one level up, reached by a different branch of the same function.
+		configCase("a_sequence_of_skill_registries_merges_into_the_builtin_it_names",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":[{"name":`+
+				`"clawhub","enabled":false}]}}}`),
+			cfgLoad("config.json")),
+
+		// A `null` element is not an error: `encoding/json` decodes null into the `{name}`
+		// probe without complaining, so an entry is built -- and then thrown away, because
+		// `Set` refuses an empty name (`config.go:1183`). Measured, the loaded registries is
+		// exactly the two builtins. `MarshalJSON` independently skips a nameless entry
+		// (`config_struct.go:438`), so one that arrived by another route would still never be
+		// written. The sequence arm checks no kind at any depth, which is why an element that
+		// is not an object at all is the only element shape that refuses -- with the probe's
+		// error, naming no field.
+		configCase("a_null_element_in_a_sequence_of_skill_registries_adds_nothing",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":[null]}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_number_element_in_a_sequence_of_skill_registries_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":[42]}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_null_where_the_skill_registries_belong_leaves_the_builtins_standing",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":null}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_string_where_the_skill_registries_belong_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":"clawhub"}}}`),
+			cfgLoad("config.json")),
+
 		// Registry names are trimmed, so a quoted key with padding lands on the entry
 		// the defaults already carry instead of creating one whose name has spaces in
 		// it. `clawhub` rather than `github` because the github path has the token
@@ -1806,6 +1866,120 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"),
 			cfgLoad("config.json")),
 
+		// --------------------------------------------- the legacy model_list merge --
+		//
+		// `mergeModelListsWithMap` (migration.go:497) builds its lookup keys from the
+		// DOCUMENT: for each entry it writes `fmt.Sprintf("%s:%d", model_name, count)` where
+		// `count` is how many times THAT NAME has already been seen, plus the bare name
+		// pointing at the first occurrence. So `:N` is a per-name duplicate counter and not a
+		// position in the list -- the opposite of how rusty-crab#20 words the rule it asks to
+		// see. With two models named m1 and m2 the only live keys are `m1:0`, `m2:0` and the
+		// two bare names; `m2:1` logs `model_name not found in main config: m2:1` and is
+		// deleted, so a case written that way would grade a dropped entry and nothing else.
+		// The index is reachable only when one `model_name` appears twice, which no case in
+		// the corpus had. Every assertion below is carried by the rewritten `.security.yml`,
+		// because `SecureStrings` have no `MarshalJSON` and never appear in the loaded value
+		// (the same reason as the case above that says so). Measured one process per shape.
+		//
+		// The doc is two entries that share the name `dup`, holding sk-doc0 and sk-doc1; a
+		// key that matches leaves the OTHER entry's own key visible, which is what makes the
+		// pair readable.
+		configCase("a_legacy_security_duplicate_name_index_reaches_the_second_entry",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"dup",`+
+				`"model":"openai/a","api_keys":["sk-doc0"]},{"model_name":"dup",`+
+				`"model":"openai/b","api_keys":["sk-doc1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    dup:1:\n        api_keys: [fb]\n"),
+			cfgLoad("config.json")),
+
+		// The bare-name arm of the same map: `indexedKeys[name]` is written only `if _, ok :=
+		// indexedKeys[name]; !ok`, so a bare name is the FIRST duplicate and never the second.
+		// Without the case above this one cannot be told apart from "the file wins for the
+		// name", which is what the existing single-entry case pins.
+		configCase("a_legacy_security_bare_name_reaches_only_the_first_duplicate",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"dup",`+
+				`"model":"openai/a","api_keys":["sk-doc0"]},{"model_name":"dup",`+
+				`"model":"openai/b","api_keys":["sk-doc1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    dup:\n        api_keys: [fb]\n"),
+			cfgLoad("config.json")),
+
+		// `dup:2` is one past the last duplicate: accepted, warned, deleted, and the document
+		// is rewritten from its own values. Accepted is the assertion -- the port must not
+		// turn an unmatched key into a refusal, and the untouched key list is the proof that
+		// nothing was merged.
+		configCase("a_legacy_security_index_past_the_last_duplicate_is_dropped",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"dup",`+
+				`"model":"openai/a","api_keys":["sk-doc0"]},{"model_name":"dup",`+
+				`"model":"openai/b","api_keys":["sk-doc1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    dup:2:\n        api_keys: [fc]\n"),
+			cfgLoad("config.json")),
+
+		// `:0` is per name, not per list position, so the SECOND model of a distinct pair is
+		// addressed as `m2:0` and not `m2:1`. This is the case that says which of the two
+		// readings is right, and a port that indexes the document by the suffix gets it
+		// backwards: it would leave m2 at sk-doc1 and warn about a key that exists.
+		configCase("a_legacy_security_key_of_the_second_model_bears_index_zero",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/a","api_keys":["sk-doc0"]},{"model_name":"m2",`+
+				`"model":"openai/b","api_keys":["sk-doc1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m2:0:\n        api_keys: [fb]\n"),
+			cfgLoad("config.json")),
+
+		// Two arms of the same three lines that differ only in what they do to the document.
+		// An entry that is not a mapping fails `v.(map[string]any)` and is skipped without a
+		// word; an entry whose `api_keys` is null passes that check and assigns nil over the
+		// document's own keys, so the rewritten file shows `m1:0: {}`. One port that treats
+		// "nothing usable in the entry" as one case is wrong on one of these two files, and
+		// the difference is silent either way -- no error, no warning.
+		configCase("a_legacy_security_entry_that_is_not_a_mapping_is_ignored",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/a","api_keys":["sk-doc0"]},{"model_name":"m2",`+
+				`"model":"openai/b","api_keys":["sk-doc1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0: scalar\n"),
+			cfgLoad("config.json")),
+
+		configCase("a_legacy_security_null_api_keys_empties_the_matched_model",
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/a","api_keys":["sk-doc0"]},{"model_name":"m2",`+
+				`"model":"openai/b","api_keys":["sk-doc1"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: null\n"),
+			cfgLoad("config.json")),
+
+		// Which arm refuses a broken `model_list` entry depends on whether a second file is
+		// sitting next to it, and nothing in the corpus said so. With a security file present
+		// the merge runs first and says `model_name is required: map[string]interface{}...`
+		// or `model_name must be a string, got float64`; alone, the same document is refused
+		// later by `ModelConfig.Validate` (`model_list[0]: model_name is required`) or earlier
+		// by the strict decoder (`expected string but got number`). Four cases, two defects,
+		// because a port that only has one of the two checks passes half of them, and the
+		// files each case leaves behind -- refused before any rewrite, so no dated backup --
+		// is part of the assertion.
+		configCaseErr("a_legacy_model_entry_without_a_model_name_is_refused_by_the_security_merge", 2,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model":"openai/a"}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: [fa]\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_legacy_model_entry_without_a_model_name_is_refused_by_validation", 1,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model":"openai/a"}]}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_legacy_model_entry_with_a_number_model_name_is_refused_by_the_security_merge", 2,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":42,"model":"openai/a"}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: [fa]\n"),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_legacy_model_entry_with_a_number_model_name_is_refused_by_the_decoder", 1,
+			cfgWrite("config.json", `{"version":2,"model_list":[{"model_name":42,"model":"openai/a"}]}`),
+			cfgLoad("config.json")),
+
+		// `version: 0` written out beside the four cases that spell it as an absent key. The
+		// ladder's arm is `case 0, 1, 2`, so the two spellings take the same path -- the log
+		// says `config migrate start from=0 to=3` either way -- and this is the case that says
+		// a port may not read the version key's ABSENCE as the only spelling of case 0.
+		configCase("a_document_with_version_zero_written_out_is_migrated",
+			cfgWrite("config.json", `{"version":0,"model_list":[{"model_name":"m1",`+
+				`"provider":"openrouter","model":"llama-3","api_key":"sk-1"}]}`),
+			cfgLoad("config.json")),
+
 		// -------------------------------------------------- secure-string shapes --
 		//
 		// A `SecureString`/`SecureStrings` field is the one place the corpus meets a type
@@ -1849,6 +2023,105 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":3,"model_list":[{"model_name":"m1",`+
 				`"provider":"p","model":"m","api_keys":["sk-doc"]}]}`),
 			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: 42\n"),
+			cfgLoad("config.json")),
+
+		// The SCALAR sibling of `api_keys` is the same named type in a position no case had
+		// ever written: `tools.skills.github.token` is a `SecureString`, not a `SecureStrings`,
+		// so every sequence rule above is about a different field. A number there says
+		// `expected string but got number` with no `for field` clause at all, a bool says the
+		// same about a bool, and a string loads. The port loads the refusing ones at defaults
+		// (rusty-crab#15) -- which is how #26 could land green on the four sequence cases
+		// without ever reaching this type in a scalar position.
+		configCaseErr("a_number_at_a_skill_token_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":123}}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_bool_at_a_skill_token_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":true}}}`),
+			cfgLoad("config.json")),
+
+		// The acceptance witness for the same field: without it, "refuse anything that is not
+		// a string" and "refuse this field" are the same port. `null` is the interesting
+		// acceptance -- `encoding/json` nils the value without calling the decoder, exactly
+		// the exemption that #26 had to reproduce for a null element inside a sequence.
+		configCase("a_null_at_a_skill_token_is_accepted",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":null}}}}`),
+			cfgLoad("config.json")),
+
+		configCase("a_string_at_a_skill_token_is_accepted",
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":"sk"}}}}`),
+			cfgLoad("config.json")),
+
+		// An object at a `SecureString` refuses, but not through the type arm -- through the
+		// unknown-field arm, naming `tools.skills.github.token.a`, because the node is decoded
+		// as a mapping and then every key inside it is unknown. Recorded because a kind check
+		// written as "not a string, so report the type error" changes which sentence this file
+		// produces. The fixture cannot see that: both refuse at op 1. The message is a
+		// port-side unit test, and this case is here so the port cannot quietly accept.
+		configCaseErr("an_object_at_a_skill_token_is_refused_as_an_unknown_field", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":{"a":1}}}}}`),
+			cfgLoad("config.json")),
+
+		// And the same named type behind a deferred decoder. A registry entry is held as
+		// `map[string]jsontext.Value`, so `auth_token` is refused only after its node was
+		// already accepted -- the third refusal surface for one Go type, and the reason a
+		// single "is this node a SecureString" hook placed at the document walk misses it.
+		configCaseErr("a_number_at_a_registry_auth_token_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"registries":`+
+				`{"clawhub":{"auth_token":123}}}}}`),
+			cfgLoad("config.json")),
+
+		// ------------------------------------------------ strict typed positions --
+		//
+		// A field whose Go type is a named slice, map or struct is decoded strictly: a scalar
+		// where the collection belongs is refused, naming the Go type it wanted -- for the
+		// document's model list, `config.json type error at line 1, column 28 for field
+		// "model_list": expected config.SecureModelList but got number`. The port accepts all
+		// of these and leaves the field at its default (rusty-crab#25). That sentence carries
+		// a line, a column, a field path and an excerpt of the document, none of which the
+		// crate computes; the fixture records only the refused index, so what these cases
+		// grade is the refusal and the sentence itself stays an explicit port-side decision.
+		//
+		// The mapping case is the one a real user hits: `{"model_list": {"m1": {...}}}` is
+		// what a pre-migration file holds, so at v3 it is the stale-version shape, not a
+		// hypothetical. `null` is the acceptance witness, and the element case is the
+		// arm one level down (`for field "model_list.0": expected config.ModelConfig but got
+		// string`) -- a port that checks only the outer node loads `["m1"]`.
+		configCaseErr("a_number_where_the_documents_model_list_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":42}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_mapping_where_the_documents_model_list_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":{"m1":{"provider":"p","model":"m"}}}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_string_inside_the_documents_model_list_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"model_list":["m1"]}`),
+			cfgLoad("config.json")),
+
+		configCase("a_null_where_the_documents_model_list_belongs_is_accepted",
+			cfgWrite("config.json", `{"version":3,"model_list":null}`),
+			cfgLoad("config.json")),
+
+		// The same rule on a map-typed field and on a struct-typed one, so the port cannot
+		// implement it as "a named slice refuses scalars". The channel map names its alias
+		// type (`expected config.channelsConfigAlias but got number`) rather than the exported
+		// name, which is another reason the message is not worth reproducing byte for byte.
+		configCaseErr("a_number_where_the_channel_list_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"channel_list":42}`),
+			cfgLoad("config.json")),
+
+		configCaseErr("a_number_where_the_tools_section_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":42}`),
+			cfgLoad("config.json")),
+
+		// And one level down from the root, which is a separate bug class on this port: field
+		// knowledge has to come from the schema of the node AT THAT DEPTH, because Go
+		// materialises per-type structs and a key can exist deep in a document and nowhere at
+		// the root. A port that asks the root schema for `tools.skills` finds nothing and
+		// accepts this file.
+		configCaseErr("a_number_where_the_skills_section_belongs_is_refused", 1,
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":42}}`),
 			cfgLoad("config.json")),
 
 		// ------------------------------------------------ validation inside the load --
