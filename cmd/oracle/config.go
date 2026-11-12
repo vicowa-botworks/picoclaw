@@ -1951,8 +1951,15 @@ func configCases() []fixtureCase {
 		// later by `ModelConfig.Validate` (`model_list[0]: model_name is required`) or earlier
 		// by the strict decoder (`expected string but got number`). Four cases, two defects,
 		// because a port that only has one of the two checks passes half of them, and the
-		// files each case leaves behind -- refused before any rewrite, so no dated backup --
-		// is part of the assertion.
+		// files each case leaves behind are part of the assertion -- with a difference between
+		// the two arms that a porter must not flatten. The two `_by_the_security_merge` cases
+		// leave the input byte-intact and no dated backup: the merge refuses before anything
+		// is rewritten. The `_by_validation` sibling leaves a REWRITTEN `config.json` at
+		// version 3 plus a `config.json.<date>.bak`, because the migration reaches its save
+		// before `ModelConfig.Validate` refuses -- the deferred-write path rusty-crab#28 was
+		// about. So "refused" is not "nothing touched"; it is "nothing touched before the
+		// rewrite point", and the recorded expectation is the only witness for that (measured
+		// at picoclaw `99ea66d6`, reviewer-side, file by file).
 		configCaseErr("a_legacy_model_entry_without_a_model_name_is_refused_by_the_security_merge", 2,
 			cfgWrite("config.json", `{"version":2,"model_list":[{"model":"openai/a"}]}`),
 			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: [fa]\n"),
@@ -1972,9 +1979,14 @@ func configCases() []fixtureCase {
 			cfgLoad("config.json")),
 
 		// `version: 0` written out beside the four cases that spell it as an absent key. The
-		// ladder's arm is `case 0, 1, 2`, so the two spellings take the same path -- the log
-		// says `config migrate start from=0 to=3` either way -- and this is the case that says
-		// a port may not read the version key's ABSENCE as the only spelling of case 0.
+		// ladder is a per-version switch -- `case 0:` (pkg/config/config.go:1325), `case 1:`
+		// (:1382), `case 2:` (:1440), `default:` refuses (:1510) -- and an absent key decodes
+		// to `Version == 0`, so both spellings arrive at the same arm, `case 0:`, rather than
+		// sharing one `case 0, 1, 2` the way an earlier draft of this comment claimed. The log
+		// says `config migrate start from=0 to=3` either way. Calibration for whoever ports
+		// it: deleting `case 0:` moves this case together with the two pre-existing version-0
+		// spellings, so this is a witness for the SPELLING (that absence is not the only way
+		// to write zero), not a unique witness for Go's arm.
 		configCase("a_document_with_version_zero_written_out_is_migrated",
 			cfgWrite("config.json", `{"version":0,"model_list":[{"model_name":"m1",`+
 				`"provider":"openrouter","model":"llama-3","api_key":"sk-1"}]}`),
@@ -2037,7 +2049,14 @@ func configCases() []fixtureCase {
 			cfgLoad("config.json")),
 
 		configCaseErr("a_bool_at_a_skill_token_is_refused", 1,
-			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":true}}}`),
+			// The closing brace is load-bearing in a way the first draft was not: at 57 bytes
+			// this document is one `}` short, so the load refuses with `unexpected end of JSON
+			// input` and the case passes without ever reaching `SecureString`. Reviewer-measured
+			// with the type arm made lenient: the malformed input still refused, the fixed input
+			// stopped refusing. Found because no error text is recorded and `error_op_index` is
+			// satisfied by any failure at that op -- `TestConfigCorpusInputsAreWellFormedJSON`
+			// is what keeps the class shut.
+			cfgWrite("config.json", `{"version":3,"tools":{"skills":{"github":{"token":true}}}}`),
 			cfgLoad("config.json")),
 
 		// The acceptance witness for the same field: without it, "refuse anything that is not
