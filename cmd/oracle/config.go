@@ -2813,5 +2813,29 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":3,"session":{"dimensions":["CHAT"]}}`),
 			cfgLoad("config.json"),
 			cfgSave("config.json")),
+
+		// The fourth apply-side arm, and the only one whose expansion is also the built-in default.
+		// Removing the port's `per-channel` arm flipped nothing until this case existed: with the
+		// default value already in the way, "the scope mapped to [chat]" and "nothing ran" are the same
+		// bytes unless the file says `dimensions: []` first. Emptying it makes the mapping observable,
+		// and unlike the three emptied shapes above this one is a fixed point -- the mapped value is
+		// what the next load's default would have produced anyway.
+		configCase("an_emptied_dimensions_array_lets_per_channel_fill_the_default_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"per-channel"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The derivation arm for the literal [chat], and the load path it belongs to. This document says
+		// [chat] and gains `dm_scope: per-channel` -- and so does every document that says nothing about
+		// `session`, because the built-in default IS [chat]: 134 of this corpus's load results come back
+		// exactly `{\"dimensions\":[\"chat\"],\"dm_scope\":\"per-channel\"}`. The only recorded values with a
+		// `dimensions` array and no scope are the three that never read a file -- the `defaults` seam, and
+		// the two cases where the config is missing or too small to parse and Go hands back
+		// DefaultConfig(). So these stages belong to LoadConfig's exit and not to DefaultConfig's, and a
+		// port that ran them on the way out of the defaults would invent a scope on those three as well.
+		configCase("dimensions_of_chat_alone_derive_a_per_channel_scope",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":["chat"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
 	}
 }
