@@ -2642,5 +2642,145 @@ func configCases() []fixtureCase {
 			cfgSave("config.json"),
 			cfgLoad("config.json"),
 			cfgSave("config.json")),
+
+		// ─── session dm_scope and dimensions, reconciled by LoadConfig's last two statements ───
+		//
+		// `dm_scope` is the key a user writes; `dimensions` is what the routing layer consumes.
+		// LoadConfig reconciles them as its FINAL two statements -- ApplyDmScope (config.go:360)
+		// then DeriveDmScope (config.go:380) -- and the corpus graded neither direction: measured
+		// against Go's own coverage
+		//     go test -tags goolm,stdjson -coverpkg=./pkg/config -coverprofile=cpu.prof ./cmd/oracle
+		// ApplyDmScope sits at 28.6% of its statements with every uncovered one inside its switch,
+		// and the 135 recorded session objects hold exactly two shapes -- {"dimensions":["chat"]}
+		// from the `defaults` op and {"dimensions":["chat"],"dm_scope":"per-channel"} after any
+		// load. So all 199 cases walk the derive-from-the-built-in-default arm and the other seven
+		// arms are free to drift on either side of the seam. Measured with
+		// /tmp/opencode/picoclaw-probes/dmscope: 25 shapes, each run three times in a fresh HOME,
+		// byte-identical across repeats, with the corpus case `session_omitted_when_empty` as the
+		// probe's positive control.
+
+		// The guard is the headline. defaults.go:48 hands every load dimensions ["chat"], so the
+		// `len(Dimensions) > 0` early return wins and a document that only writes `dm_scope` never
+		// reaches the mapping: `per-peer` loads ["chat"], which is per-CHANNEL behaviour. A port
+		// that maps the scope string first, or that clears dimensions when it sees a scope, gets
+		// this wrong in the direction that silently merges or splits the user's chats.
+		configCase("a_session_dm_scope_of_per_peer_does_not_replace_the_default_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dm_scope":"per-peer"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The same guard on the other multi-dimension scope: the file keeps BOTH keys, and they
+		// disagree, forever -- the pair is stable across a save, so nothing downstream ever
+		// reconciles it.
+		configCase("a_session_dm_scope_of_per_channel_peer_does_not_replace_the_default_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dm_scope":"per-channel-peer"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// To reach ApplyDmScope's switch at all, the document must ALSO empty `dimensions`
+		// explicitly. Then, and only then, does the scope string choose the dimensions:
+		// per-channel-peer is ["chat","sender"].
+		configCase("an_emptied_dimensions_array_lets_per_channel_peer_fill_the_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"per-channel-peer"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// per-peer is ["sender"] alone -- the sender dimension without a chat dimension, the shape
+		// that puts every chat from one person in a single session.
+		configCase("an_emptied_dimensions_array_lets_per_peer_fill_the_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"per-peer"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// global clears the dimensions rather than setting them, so the saved session holds only
+		// `dm_scope`. Two saves, because the first one loses the emptied array: the next load has
+		// no `dimensions` key to merge over the default, so ["chat"] comes back and the scope stops
+		// meaning what the file says. That is what `save_stable` records here.
+		configCase("an_emptied_dimensions_array_with_a_global_scope_keeps_no_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"global"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The guard's other side, stated as its own case: `global` beside explicit dimensions is
+		// inert. The dimensions win even though `global` is the value that would have cleared them.
+		configCase("a_global_scope_beside_explicit_dimensions_is_inert",
+			cfgWrite("config.json", `{"version":3,"session":{"dm_scope":"global","dimensions":["chat"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// And it is a permanent disagreement, not a transient one: ["sender"] with `per-channel`
+		// loads, saves and reloads unchanged, because DeriveDmScope only ever fills an EMPTY scope.
+		configCase("explicit_dimensions_and_a_conflicting_dm_scope_stay_conflicting",
+			cfgWrite("config.json", `{"version":3,"session":{"dm_scope":"per-channel","dimensions":["sender"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// DeriveDmScope's three arms, one case each. All three are graded today only for the
+		// built-in default's own ["chat"], which the 199 cases reach by never mentioning session.
+		configCase("dimensions_of_chat_and_sender_derive_a_per_channel_peer_scope",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":["chat","sender"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		configCase("dimensions_of_sender_alone_derive_a_per_peer_scope",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":["sender"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The negative of the derivation: an array that matches no known scope leaves `dm_scope`
+		// absent rather than inventing a value for it. Order matters to Go here -- it compares the
+		// whole slice against three literals -- so ["sender","chat"] would also land here; that
+		// permutation is the same rule and is deliberately not duplicated.
+		configCase("a_custom_dimensions_array_derives_no_dm_scope",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":["chat","thread"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// An unrecognised scope is stored verbatim -- no trim, no case folding -- AND it suppresses
+		// the derivation, because DeriveDmScope returns as soon as the scope is non-empty. With
+		// dimensions emptied that is a session with NO dimensions at all: one misspelled value
+		// silently turns session scoping off, and the file keeps the typo as if it meant it.
+		configCase("an_unrecognised_dm_scope_is_kept_and_suppresses_the_derivation",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"sideways"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The same rule reached by capitalisation, because the switch is on the exact string and a
+		// port that lowercases first (Go lowercases in TurnProfileMode.Effective, so the idiom is
+		// in this package) would map "GLOBAL" and produce dimensions the user still has.
+		configCase("a_capitalised_dm_scope_is_not_normalised_and_yields_no_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"GLOBAL"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// An explicitly emptied session is not a fixed point. The first save writes no session at
+		// all (every field is omitempty), so the reload merges over the defaults and comes back as
+		// ["chat"] with the derived scope -- the corpus already pins the first save in
+		// `session_omitted_when_empty`; what it did not pin is that the next load undoes it.
+		configCase("an_emptied_session_returns_as_the_default_on_the_next_load",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// Both directions run on the legacy arms too, and the migration rewrites the file, so the
+		// derived scope lands in the bytes on disk rather than only in the loaded value. A port
+		// that reconciles only on the current-version path differs here.
+		configCase("a_document_with_no_version_derives_the_scope_before_rewriting",
+			cfgWrite("config.json", `{"session":{"dimensions":["sender"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		configCase("a_version_two_document_maps_the_scope_on_the_migration_path",
+			cfgWrite("config.json", `{"version":2,"session":{"dm_scope":"per-channel"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
 	}
 }
