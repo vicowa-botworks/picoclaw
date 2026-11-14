@@ -2387,5 +2387,260 @@ func configCases() []fixtureCase {
 		configCaseErr("a_channel_name_that_is_no_known_type_is_refused", 1,
 			cfgWrite("config.json", `{"version":3,"channel_list":{"pico2":{"enabled":true}}}`),
 			cfgLoad("config.json")),
+
+		// ------------------------------------------------- legacy `bindings` --
+		//
+		// `bindings` is the pre-v3 way a peer was bound to an agent: an array of
+		// `{agent_id, match:{channel, account_id, guild_id, team_id, peer}}`, migrated into
+		// `agents.dispatch.rules` by `applyLegacyBindingsMigration`
+		// (pkg/config/legacy_bindings.go:35) and then dropped from the document. Nothing in
+		// this corpus wrote the key before -- 0 of the 179 cases mention `bindings` -- which
+		// is why the port that silently dropped the migration (rusty-crab #32) had no
+		// witness. Every shape below was measured one process per shape against Go with a
+		// fresh HOME; the inputs here are read out of that probe directory rather than
+		// retyped, and Go's verdicts are in its run.log and out-*.json.
+
+		// Fifteen bindings covering every kind the migrator knows, in one document. Go produced eleven
+		// rules: the entries with a blank `agent_id`, a blank channel, an unknown peer `kind` and a
+		// blank peer id are dropped rather than turned into wildcard rules, and the survivors come out
+		// ordered by kind, not in array order -- so the rule names, `legacy-binding-1` through `-11`,
+		// are part of the assertion and not just the `when` objects.
+		configCase("a_legacy_bindings_document_migrates_every_binding_kind",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":"agent-guild","match":{"channel":"D`+
+				`ISCORD","guild_id":"G1"}},{"agent_id":"agent-plain","match":{"channel":"`+
+				`telegram"}},{"agent_id":"agent-direct","match":{"channel":"telegram","pe`+
+				`er":{"kind":"direct","id":"U9"}}},{"agent_id":"agent-star","match":{"cha`+
+				`nnel":"slack","account_id":"*"}},{"agent_id":"agent-team","match":{"chan`+
+				`nel":"slack","team_id":"T1"}},{"agent_id":"agent-acct-guild","match":{"c`+
+				`hannel":"discord","account_id":"Work","guild_id":"G2"}},{"agent_id":"","`+
+				`match":{"channel":"telegram"}},{"agent_id":"agent-nochan","match":{"chan`+
+				`nel":"  "}},{"agent_id":"agent-badpeer","match":{"channel":"telegram","p`+
+				`eer":{"kind":"whatever","id":"x"}}},{"agent_id":"agent-emptypeer","match`+
+				`":{"channel":"telegram","peer":{"kind":"direct","id":"  "}}},{"agent_id"`+
+				`:"agent-group","match":{"channel":"discord","peer":{"kind":"GROUP","id":`+
+				`"C5"}}},{"agent_id":"agent-topic","match":{"channel":"telegram","peer":{`+
+				`"kind":"topic","id":"T7"}}},{"agent_id":"agent-acct-peer","match":{"chan`+
+				`nel":"telegram","account_id":"WORK","peer":{"kind":"direct","id":"U8"}}}`+
+				`,{"agent_id":"agent-space-peer","match":{"channel":"discord","guild_id":`+
+				`"G3","peer":{"kind":"channel","id":"C6"}}},{"agent_id":"agent-star-guild`+
+				`","match":{"channel":"slack","account_id":"*","guild_id":"G4"}}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The guard the migration is documented to honour: with `agents.dispatch.rules` already
+		// configured, `bindings` is ignored -- not appended to, not merged. Go rewrote the user's own
+		// single rule with no `legacy-binding-*` beside it, so a port that migrates first and lets the
+		// document win afterwards produces two rules here.
+		configCase("existing_dispatch_rules_are_not_touched_by_legacy_bindings",
+			cfgWrite("config.json", `{"version":2,"agents":{"dispatch":{"rules":[{"name":"mine","agent":"expl`+
+				`icit","when":{"channel":"telegram"}}]}},"bindings":[{"agent_id":"agent-p`+
+				`lain","match":{"channel":"discord","guild_id":"G1"}}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The empty array is not no migration, it is a migration that produced nothing: the `dispatch`
+		// key is absent from the loaded config entirely rather than present with an empty list. Baseline
+		// for the four shapes below that also produce nothing.
+		configCase("an_empty_legacy_bindings_array_writes_no_dispatch_section",
+			cfgWrite("config.json", `{"version":2,"bindings":[]}`),
+			cfgLoad("config.json")),
+
+		// `null` and `[]` agree, so a port cannot conflate a missing sequence with an empty one and
+		// still pass the case above.
+		configCase("a_null_legacy_bindings_value_writes_no_dispatch_section",
+			cfgWrite("config.json", `{"version":2,"bindings":null}`),
+			cfgLoad("config.json")),
+
+		// An object where the array belongs is a decode failure, and Go's answer is a warning -- `legacy
+		// bindings config detected but could not be decoded`, legacy_bindings.go:42 -- followed by a
+		// successful load with no rules. The load is not refused: a bad legacy key warns, it does not
+		// fail, so a port that returns an error for an undecodable `bindings` rejects a file that loads
+		// fine on the user's machine today.
+		configCase("a_non_array_legacy_bindings_value_yields_no_rules",
+			cfgWrite("config.json", `{"version":2,"bindings":{"agent_id":"x","match":{"channel":"telegram"}}}`),
+			cfgLoad("config.json")),
+
+		// The all-or-nothing half of the same rule, and the reason the case above is not enough on its
+		// own: a valid binding is present in the array and is *also* dropped, because the array is
+		// decoded as one unit (Go: `cannot unmarshal number into Go struct field .0.agent_id of type
+		// string`). A port that decodes element by element keeps the good entry and writes one rule.
+		configCase("one_numbered_agent_id_drops_the_whole_legacy_bindings_array",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":5,"match":{"channel":"telegram"}},{`+
+				`"agent_id":"ok","match":{"channel":"telegram"}}]}`),
+			cfgLoad("config.json")),
+
+		// Same all-or-nothing, different position in the array (Go: `cannot unmarshal number into .1 of
+		// type config.legacyAgentBinding`), so the rule is not the narrower one about the first element.
+		configCase("a_non_object_legacy_binding_entry_drops_the_whole_array",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":"ok","match":{"channel":"telegram"}`+
+				`},7]}`),
+			cfgLoad("config.json")),
+
+		// And the same rule reached through a nested field (Go: `... into Go struct field
+		// .0.match.account_id of type string`): the failure is inside `match`, and the whole array still
+		// goes.
+		configCase("a_numbered_account_id_drops_the_whole_legacy_bindings_array",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":"ok","match":{"channel":"telegram",`+
+				`"account_id":9}}]}`),
+			cfgLoad("config.json")),
+
+		// The null variant, and the reason the three shapes above are not one rule about a bad element.
+		// `null` decodes -- into a zero-valued binding, which is then dropped for its empty `agent_id`
+		// -- so the valid entry beside it survives as one rule. A port that treats a null element as a
+		// decode failure writes nothing and fails this case while passing c4, c5 and c6.
+		configCase("a_null_legacy_binding_entry_does_not_drop_the_ones_beside_it",
+			cfgWrite("config.json", `{"version":2,"bindings":[null,{"agent_id":"ok","match":{"channel":"teleg`+
+				`ram"}}]}`),
+			cfgLoad("config.json")),
+
+		// `match` absent is not match anything: the entry produces no rule at all. A port that defaults
+		// a missing selector to a wildcard binds that agent to every message on the channel.
+		configCase("a_legacy_binding_without_a_match_yields_no_rule",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":"ok"}]}`),
+			cfgLoad("config.json")),
+
+		// A refusal case, and the shape that says the legacy key is no exemption from the unknown-field
+		// walk: `version2` beside `bindings` at v2 is refused, and the expectation records the directory
+		// as it stands -- input file untouched, no backup. The refusal comes from the migration path's
+		// own check site (config.go:1447) rather than the current-version one, which is why the same
+		// unknown key is reported from a different place at v3.
+		configCaseErr("an_unknown_field_beside_legacy_bindings_is_refused_nothing_written", 1,
+			cfgWrite("config.json", `{"version":2,"bindings":[],"version2":1}`),
+			cfgLoad("config.json")),
+
+		// `session.identity_links` rewrites a direct peer's sender id while the binding is being
+		// migrated (`canonicalLegacyBindingSenderID`, legacy_bindings.go:215). Three entries, three
+		// answers: `TG:111` becomes `canonical-user` through its qualified form, `discord:222` reaches
+		// the same key from the other channel, and `333` -- held by no link -- is written through byte
+		// for byte. That middle entry is the null variant the port has to keep: the fallback is the peer
+		// id as given, not the empty string and not a dropped rule.
+		configCase("legacy_bindings_canonicalise_a_direct_peer_through_identity_links",
+			cfgWrite("config.json", `{"version":2,"session":{"identity_links":{"canonical-user":["tg:111","di`+
+				`scord:222"]}},"bindings":[{"agent_id":"a1","match":{"channel":"telegram"`+
+				`,"peer":{"kind":"direct","id":"TG:111"}}},{"agent_id":"a2","match":{"cha`+
+				`nnel":"discord","peer":{"kind":"direct","id":"333"}}},{"agent_id":"a3","`+
+				`match":{"channel":"discord","peer":{"kind":"direct","id":"discord:222"}}`+
+				`}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The other side of the migration window: the same key at the current version is refused instead
+		// of migrated (`config.json contains unknown field(s): bindings`, from the current-version site
+		// at config.go:1496). The version number alone decides migrate-or-refuse, so a port that puts
+		// the legacy key in the current schema accepts this file, and a port that only ever refuses it
+		// fails every migration case above.
+		configCaseErr("legacy_bindings_are_refused_at_the_current_version", 1,
+			cfgWrite("config.json", `{"version":3,"bindings":[{"agent_id":"agent-plain","match":{"channel":"t`+
+				`elegram"}}]}`),
+			cfgLoad("config.json")),
+
+		// The bottom of the ladder, and the sharpest diagnostic in the family. At v0 the deprecated
+		// `api_key` is normally migrated -- `migrate_v0_api_key_becomes_api_keys` grades that -- yet
+		// with `bindings` in the same document the load is refused, and the sentence names `api_key` (v0
+		// site, config.go:1331) while the key that has no home at the current version is `bindings`.
+		// Recorded as a refusal over an untouched directory because the fixture cannot carry the
+		// sentence -- it quotes an absolute path -- so the case name says which field Go blamed.
+		configCaseErr("a_version_zero_document_carrying_api_key_and_legacy_bindings_is_refused", 1,
+			cfgWrite("config.json", `{"version":0,"api_key":"sk-1","bindings":[{"agent_id":"agent-plain","mat`+
+				`ch":{"channel":"telegram"}}]}`),
+			cfgLoad("config.json")),
+
+		// v0 and v1 are not their own rules: the ladder runs every legacy arm through the same v2-to-v3
+		// step, so a v1 document migrates `bindings` exactly as a v2 one does. Without a v0 or v1 case
+		// here, a port could gate the migration on `version == 2` and still pass the rest of the corpus.
+		configCase("a_version_one_document_migrates_legacy_bindings",
+			cfgWrite("config.json", `{"version":1,"bindings":[{"agent_id":"agent-plain","match":{"channel":"t`+
+				`elegram"}}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// And the arm below that: a document with no `version` key at all is case 0, and it migrates
+		// too.
+		configCase("a_document_without_a_version_migrates_legacy_bindings",
+			cfgWrite("config.json", `{"bindings":[{"agent_id":"agent-plain","match":{"channel":"telegram"}}]}`),
+			cfgLoad("config.json")),
+
+		// The silent drop, which is the shape this family exists to pin as much as the happy path.
+		// `bindings` written in `.security.yml` and nowhere in `config.json` is not migrated: the
+		// migration parses the document's own bytes -- `applyLegacyBindingsMigration(data, cfg)` is
+		// handed the raw `config.json`, not the merged map that `loadConfigMap` builds on the legacy
+		// arms -- so a key that exists only in the security file never reaches it. Nothing is refused,
+		// and `bindings` is absent from both files Go wrote: `save` re-emits the security document from
+		// the typed config, and the key has no field to come back from. A port that merges the security
+		// file before migrating produces a rule here; one that carries the key through the save leaves
+		// it in the file.
+		configCase("legacy_bindings_in_the_security_file_alone_are_not_migrated",
+			cfgWrite("config.json", `{"version":2}`),
+			cfgWrite(".security.yml", "bindings:\n  - agent_id: sec-agent\n    match:\n      channel: telegram\n"),
+			cfgLoad("config.json")),
+
+		// Seven direct peers against six identity links: a qualified hit, a bare-suffix hit, a peer id
+		// that is itself `:7`, a link value written in upper case, a channel spelled in caps, a literal
+		// `*` peer, and a link whose key is the empty string. Every one produced a rule, and the
+		// `sender` each got is the assertion. Deliberately collision-free: no peer id is claimed by two
+		// link keys, because that shape -- one id under two keys -- is decided by Go's map iteration
+		// order (five processes, `key-one key-one key-three key-one`) and belongs in
+		// docs/DIVERGENCES.md, not in a fixture that claims byte equality.
+		configCase("legacy_binding_senders_take_the_canonical_identity_link_form",
+			cfgWrite("config.json", `{"version":2,"session":{"identity_links":{"can-qualified":["slack:999"],`+
+				`"can-suffix":["777"],"can-leading-colon":["7"],"can-uppercase":["TG:UP"]`+
+				`,"can-star":["*"],"":["can-empty-key"]}},"bindings":[{"agent_id":"h1","m`+
+				`atch":{"channel":"slack","peer":{"kind":"direct","id":"999"}}},{"agent_i`+
+				`d":"h2","match":{"channel":"telegram","peer":{"kind":"direct","id":"tg:7`+
+				`77"}}},{"agent_id":"h3","match":{"channel":"telegram","peer":{"kind":"di`+
+				`rect","id":":7"}}},{"agent_id":"h4","match":{"channel":"telegram","peer"`+
+				`:{"kind":"direct","id":"TG:up"}}},{"agent_id":"h5","match":{"channel":"S`+
+				`LACK","peer":{"kind":"direct","id":"999"}}},{"agent_id":"h6","match":{"c`+
+				`hannel":"slack","peer":{"kind":"direct","id":"*"}}},{"agent_id":"h7","ma`+
+				`tch":{"channel":"slack","peer":{"kind":"direct","id":"CAN-EMPTY-KEY"}}}]`+
+				`}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The ordering rule with the wildcard first in the array, which the kind-order case above cannot
+		// show because there the wildcards came later. An `account_id:"*"` binding becomes a channel-
+		// only rule -- the selector turns into `default` and vanishes -- and sorts as kind 4, behind the
+		// `team_id` rule written as kind 3 and behind the plain channel rule: Go's order is team-fourth,
+		// plain-second, star-first, star-third, while the names stay attached to the array positions the
+		// bindings came from. A port that sorts by name, or that keeps a wildcard `account` in the rule,
+		// matches nothing here.
+		configCase("a_wildcard_account_legacy_binding_sorts_behind_a_team_binding",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":"star-first","match":{"channel":"ma`+
+				`trix","account_id":"*"}},{"agent_id":"plain-second","match":{"channel":"`+
+				`matrix"}},{"agent_id":"star-third","match":{"channel":"irc","account_id"`+
+				`:"*"}},{"agent_id":"team-fourth","match":{"channel":"matrix","team_id":"`+
+				`T9"}}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// Idempotence, the property this whole seam exists to protect: the file is rewritten at every
+		// start, so a migration that leaves something to migrate again compounds on every run. Load,
+		// save, load, save -- the second load must find no `bindings` left to migrate, and `save_stable`
+		// answers whether the two saves wrote identical bytes. Asked and answered here for the legacy
+		// family, where re-migrating is plausible in a way it is not for a document that was already
+		// current.
+		configCase("a_migrated_legacy_bindings_document_saves_the_same_bytes_twice",
+			cfgWrite("config.json", `{"version":2,"bindings":[{"agent_id":"agent-guild","match":{"channel":"D`+
+				`ISCORD","guild_id":"G1"}},{"agent_id":"agent-plain","match":{"channel":"`+
+				`telegram"}},{"agent_id":"agent-direct","match":{"channel":"telegram","pe`+
+				`er":{"kind":"direct","id":"U9"}}},{"agent_id":"agent-star","match":{"cha`+
+				`nnel":"slack","account_id":"*"}},{"agent_id":"agent-team","match":{"chan`+
+				`nel":"slack","team_id":"T1"}},{"agent_id":"agent-acct-guild","match":{"c`+
+				`hannel":"discord","account_id":"Work","guild_id":"G2"}},{"agent_id":"","`+
+				`match":{"channel":"telegram"}},{"agent_id":"agent-nochan","match":{"chan`+
+				`nel":"  "}},{"agent_id":"agent-badpeer","match":{"channel":"telegram","p`+
+				`eer":{"kind":"whatever","id":"x"}}},{"agent_id":"agent-emptypeer","match`+
+				`":{"channel":"telegram","peer":{"kind":"direct","id":"  "}}},{"agent_id"`+
+				`:"agent-group","match":{"channel":"discord","peer":{"kind":"GROUP","id":`+
+				`"C5"}}},{"agent_id":"agent-topic","match":{"channel":"telegram","peer":{`+
+				`"kind":"topic","id":"T7"}}},{"agent_id":"agent-acct-peer","match":{"chan`+
+				`nel":"telegram","account_id":"WORK","peer":{"kind":"direct","id":"U8"}}}`+
+				`,{"agent_id":"agent-space-peer","match":{"channel":"discord","guild_id":`+
+				`"G3","peer":{"kind":"channel","id":"C6"}}},{"agent_id":"agent-star-guild`+
+				`","match":{"channel":"slack","account_id":"*","guild_id":"G4"}}]}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
 	}
 }
