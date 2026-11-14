@@ -2782,5 +2782,36 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":2,"session":{"dm_scope":"per-channel"}}`),
 			cfgLoad("config.json"),
 			cfgSave("config.json")),
+
+		// The three cases a negative control extracted from the fifteen above. Injecting "trim and
+		// lower-case the scope before the switch" into the Rust port flipped 0 of 214 cases: the
+		// family graded the scope string's IDENTITY but not its EXACTNESS, because every odd value it
+		// carried was paired with dimensions that were already empty (mapping a folded "GLOBAL" clears
+		// what is already clear) or already set (the guard returns first). These three are the shapes
+		// where folding a value changes the bytes -- measured in the same probe, three runs each.
+		configCase("a_capitalised_per_peer_scope_maps_no_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":"PER-PEER"}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// Padding kept verbatim, and it is not cosmetic: a trimmed `per-peer` would fill in
+		// ["sender"], which is a different session keying for every chat the user has.
+		configCase("a_padded_per_peer_scope_maps_no_dimensions",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":[],"dm_scope":" Per-Peer "}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json"),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
+
+		// The same exactness on the derivation side. Go compares the slice against three literals, so
+		// ["CHAT"] derives nothing and the session keeps only what the user wrote -- and, unlike the
+		// two shapes above, this one IS a fixed point: nothing is cleared, so the next load agrees.
+		// A port that folds case here invents a `dm_scope` that never existed in the file.
+		configCase("a_capitalised_dimension_derives_no_scope",
+			cfgWrite("config.json", `{"version":3,"session":{"dimensions":["CHAT"]}}`),
+			cfgLoad("config.json"),
+			cfgSave("config.json")),
 	}
 }
