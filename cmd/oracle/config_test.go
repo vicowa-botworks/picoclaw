@@ -48,9 +48,69 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 // assertion wearing different clothes: a case added without a re-pin moves both, and a
 // message that hardcodes the number goes stale the moment someone updates the check above
 // and only looks at that line.
-const wantConfigCaseCount = 138
+const wantConfigCaseCount = 168
 
-const wantConfigCorpusSHA = "acd3c622a95ed7b838acf510c6f3e009be9ed865fd77308abed3873e4bae146c"
+const wantConfigCorpusSHA = "91b1e634a0708a98d45f1275fac23f9145a53d1f8fd896daeb4f1ab8c666349c"
+
+// TestConfigCorpusInputsAreWellFormedJSON shuts the one way a refusal case can be inert.
+//
+// The fixture records `error_op_index` and no error text, so a case passes as long as the
+// load fails *at that op* -- including for a reason that has nothing to do with the rule the
+// comment states. `a_bool_at_a_skill_token_is_refused` shipped with a `config.json` one `}`
+// short and refused on `unexpected end of JSON input`: with `SecureString.UnmarshalJSON`
+// rewritten to swallow its type error the case still passed, i.e. it asserted nothing about
+// the type arm it exists to pin. A syntax error is not the only such shadow -- a stray key,
+// a trailing comma, a YAML-spelled body all fail before any decoder in the document runs --
+// but all of them are the same check: the input has to parse before the case means anything.
+//
+// Three cases are excused because unparseable input IS their subject, and each is a mover
+// for the failure it names, so the exception list stays three long rather than growing:
+// `malformed_json_is_refused` (a truncated object), `empty_file_is_refused` (zero bytes,
+// which is "broken" rather than "defaults"), `yaml_file_is_refused` (a YAML body).
+//
+// Non-JSON extensions are skipped rather than excused: `.security.yml` is YAML by contract.
+func TestConfigCorpusInputsAreWellFormedJSON(t *testing.T) {
+	excused := map[string]string{
+		"malformed_json_is_refused": "a truncated object is the subject",
+		"empty_file_is_refused":     "zero bytes is the subject",
+		"yaml_file_is_refused":      "a YAML body is the subject",
+	}
+	checked := 0
+	for _, c := range configCases() {
+		if _, ok := excused[c.Name]; ok {
+			continue
+		}
+		for _, s := range c.configScript {
+			if s.op != "write_file" || !strings.HasSuffix(s.name, ".json") {
+				continue
+			}
+			checked++
+			if !json.Valid([]byte(s.content)) {
+				t.Errorf("%s writes a %s that does not parse (%d bytes). The load then fails "+
+					"before any decoder in the document runs, so error_op_index is satisfied by a "+
+					"syntax error and the case pins nothing it claims to. If unparseable input IS "+
+					"the subject, add the case to the excused list with the reason the others carry.",
+					c.Name, s.name, len(s.content))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Error("no case wrote a .json file, so this check was vacuous")
+	}
+	// The excused three are asserted by name, not by count: a case renamed out of the list
+	// would otherwise leave the exception silently covering something else.
+	seen := map[string]bool{}
+	for _, c := range configCases() {
+		if _, ok := excused[c.Name]; ok {
+			seen[c.Name] = true
+		}
+	}
+	for name := range excused {
+		if !seen[name] {
+			t.Errorf("the excused case %s is not in the corpus; the exception list is stale", name)
+		}
+	}
+}
 
 // TestConfigCorpusIgnoresTheMachine is the part the digest above cannot prove on
 // its own: it runs the generator with the environment a real user would have and
