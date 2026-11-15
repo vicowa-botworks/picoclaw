@@ -1866,6 +1866,54 @@ func configCases() []fixtureCase {
 			cfgWrite(".security.yml", "web:\n    brave:\n        api_keys: [bk]\n"),
 			cfgLoad("config.json")),
 
+		// --------------------------------------------- the merge at the bottom of the ladder --
+		//
+		// Every arm of the version switch calls loadConfigMap (config.go:1340, :1398,
+		// :1455), which reads config.json AND .security.yml and merges them as plain data
+		// before the ladder runs, so the security file is not a current-version feature. What
+		// the corpus left ungraded is the bottom of that ladder: of the cases entering at
+		// `version` absent or 0, none pairs a `.security.yml` at all, and of the four entering
+		// at v1 only two carry a security file, neither with a `model_list`. Measured one
+		// process per shape at 9dbecf98 (/tmp/opencode/picoclaw-probes/legacy20). The merge
+		// verdict lives in the rewritten `.security.yml` for the reason the case above gives
+		// -- SecureStrings never marshal -- and the loaded value is recorded alongside it
+		// because the lift case below disagrees with it: a registries token IS in the loaded
+		// value (a plain string, not a SecureString) and `api_keys` never is.
+		configCase("a_version_zero_document_merges_a_security_model_list_key",
+			cfgWrite("config.json", `{"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o","api_keys":["sk-doc"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: [sk-file]\n"),
+			cfgLoad("config.json")),
+
+		configCase("a_version_one_document_merges_a_security_model_list_key",
+			cfgWrite("config.json", `{"version":1,"model_list":[{"model_name":"m1",`+
+				`"model":"openai/gpt-4o","api_keys":["sk-doc"]}]}`),
+			cfgWrite(".security.yml", "model_list:\n    m1:0:\n        api_keys: [sk-file]\n"),
+			cfgLoad("config.json")),
+
+		// The `web`/`skills` lift (migration.go:427-436, inside loadConfigMap) and the
+		// clawhub-to-registries compat are usually described as v2 behaviour. They are not: they
+		// sit on the path every arm takes, so a document with no version number lifts too. This
+		// is also the only shape family here whose secret is visible in the LOADED value: a
+		// registries token is a plain string, not a SecureString, so `clawhub` reappears under
+		// `registries` in the load result while `api_keys` never does. Both observabilities are
+		// pinned by the same case, which is the point of writing it at this arm.
+		configCase("a_version_zero_document_lifts_security_web_and_skills",
+			cfgWrite("config.json", `{"model_list":[{"model_name":"m1","model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "web:\n    searxng:\n        base_url: http://sx.local\n"+
+				"skills:\n    clawhub:\n        token: ch_secret\n"),
+			cfgLoad("config.json")),
+
+		// The null-guard on the lift, at the arm the existing null-section family never reaches
+		// (`a_null_web_section_is_refused_for_a_legacy_document` and its siblings all enter at
+		// v2). The refusal text is part of the pin: it names config.json although `web` came from
+		// the security file, because the decoder is shown the merged document. Both input files
+		// stay byte-identical and no backup is created, which is what `files` records here.
+		configCaseErr("a_null_security_web_is_refused_for_a_version_zero_document", 2,
+			cfgWrite("config.json", `{"model_list":[{"model_name":"m1","model":"openai/gpt-4o"}]}`),
+			cfgWrite(".security.yml", "web:\nskills:\n    clawhub:\n        token: ch_secret\n"),
+			cfgLoad("config.json")),
+
 		// --------------------------------------------- the legacy model_list merge --
 		//
 		// `mergeModelListsWithMap` (migration.go:497) builds its lookup keys from the
@@ -1991,6 +2039,65 @@ func configCases() []fixtureCase {
 			cfgWrite("config.json", `{"version":0,"model_list":[{"model_name":"m1",`+
 				`"provider":"openrouter","model":"llama-3","api_key":"sk-1"}]}`),
 			cfgLoad("config.json")),
+
+		// ------------------------------------------------- the agent-model collapse on save --
+		//
+		// AgentModelConfig.MarshalJSON (config.go:303-312) writes a BARE STRING whenever
+		// Fallbacks is empty and Primary is not, and otherwise an object whose two fields are
+		// both omitempty. The object spelling therefore never reaches disk in the common case,
+		// and the seven shapes below are the truth table of that condition plus the read-side
+		// control -- each is a different arm of the `if`, so a port that collapses "any object
+		// carrying a primary key" passes the first and fails the empty-primary pair.
+		// rusty-crab#33: the port echoed the object instead, on the migration write as well as
+		// on an explicit save, so both write paths are graded from here.
+		configCase("a_primary_only_agent_model_saves_as_a_bare_string",
+			cfgWrite("config.json", `{"version":3,"agents":{"list":[{"id":"a",`+
+				`"model":{"primary":"gpt-4"}}]}}`),
+			cfgLoad("config.json"), cfgSave("config.json")),
+
+		configCase("an_agent_model_with_fallbacks_saves_as_an_object",
+			cfgWrite("config.json", `{"version":3,"agents":{"list":[{"id":"a",`+
+				`"model":{"primary":"gpt-4","fallbacks":["gpt-3"]}}]}}`),
+			cfgLoad("config.json"), cfgSave("config.json")),
+
+		// The empty-primary arm: the condition requires a non-empty Primary, so this one takes
+		// the object branch, and because BOTH fields are omitempty there it writes an EMPTY
+		// object rather than `{"primary":""}`. A port that collapses on "object with a primary
+		// key present" gets `{}` here by accident and the wrong bytes on the case above.
+		configCase("an_agent_model_with_an_empty_primary_saves_as_an_empty_object",
+			cfgWrite("config.json", `{"version":3,"agents":{"list":[{"id":"a",`+
+				`"model":{"primary":""}}]}}`),
+			cfgLoad("config.json"), cfgSave("config.json")),
+
+		configCase("an_agent_model_with_only_fallbacks_omits_the_empty_primary",
+			cfgWrite("config.json", `{"version":3,"agents":{"list":[{"id":"a",`+
+				`"model":{"fallbacks":["gpt-3"]}}]}}`),
+			cfgLoad("config.json"), cfgSave("config.json")),
+
+		// The second position that carries the type: SubagentsConfig.Model (config.go:326) is the
+		// same *AgentModelConfig, so the collapse has to happen inside `subagents` too. A port
+		// that fixes only `agents.list[].model` leaves this one as an object.
+		configCase("a_subagent_model_saves_as_a_bare_string",
+			cfgWrite("config.json", `{"version":3,"agents":{"list":[{"id":"a",`+
+				`"subagents":{"model":{"primary":"gpt-4"}}}]}}`),
+			cfgLoad("config.json"), cfgSave("config.json")),
+
+		// The migration's own write rather than an explicit save: a v2 document enters the ladder
+		// and Go rewrites config.json as part of the load, so the collapse is graded on that path
+		// as well. With the first case that is the "both save paths" #33 asks for.
+		configCase("a_migrated_document_writes_a_bare_agent_model",
+			cfgWrite("config.json", `{"version":2,"agents":{"list":[{"id":"a",`+
+				`"model":{"primary":"gpt-4"}}]}}`),
+			cfgLoad("config.json")),
+
+		// Control and idempotence: the string spelling is what Go already writes, so loading it
+		// and saving it twice must change nothing. Saving twice is what makes `save_stable` asked
+		// and answered here -- a config that shifts a little on every save is the failure mode
+		// this seam exists to catch, and this is the family where the type makes it plausible.
+		configCase("a_bare_string_agent_model_survives_two_saves_unchanged",
+			cfgWrite("config.json", `{"version":3,"agents":{"list":[{"id":"a",`+
+				`"model":"gpt-4"}]}}`),
+			cfgLoad("config.json"), cfgSave("config.json"), cfgSave("config.json")),
 
 		// -------------------------------------------------- secure-string shapes --
 		//

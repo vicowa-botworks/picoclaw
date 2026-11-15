@@ -48,9 +48,9 @@ func TestConfigCorpusIsByteStable(t *testing.T) {
 // assertion wearing different clothes: a case added without a re-pin moves both, and a
 // message that hardcodes the number goes stale the moment someone updates the check above
 // and only looks at that line.
-const wantConfigCaseCount = 168
+const wantConfigCaseCount = 179
 
-const wantConfigCorpusSHA = "91b1e634a0708a98d45f1275fac23f9145a53d1f8fd896daeb4f1ab8c666349c"
+const wantConfigCorpusSHA = "4310fd48a34c8d883a88cc9942aa0fa313017b2fa5355ccd0546b17a1c38f228"
 
 // TestConfigCorpusInputsAreWellFormedJSON shuts the one way a refusal case can be inert.
 //
