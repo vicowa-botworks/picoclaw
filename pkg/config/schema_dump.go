@@ -131,6 +131,143 @@ type node struct {
 	// SkillsRegistriesConfig -- each of which emits a hand-built "only the secrets"
 	// projection rather than the struct's fields.
 	Marshaler bool `json:"marshaler,omitempty"`
+	// EnvIndex is set on the root node only: every environment variable env.Parse
+	// binds, and the document position it writes. Flat, not a tree -- see envBinding.
+	//
+	// pkg/config carries 200 `env` tags over 195 distinct names plus 26 `envPrefix`
+	// tags, and no other kind of option: measured, zero tags in the package carry a
+	// comma, so there is no `,omitempty`, `,default`, `,required` or `,expandVar` to
+	// model. A port cannot copy that list by hand. The name a variable answers to is
+	// not the string at the field that carries it -- `envPrefix` on an ancestor is
+	// prepended at parse time -- and one type (`ToolConfig`) is embedded under 23
+	// different prefixes, so the same field answers to PICOCLAW_TOOLS_WEB_ENABLED
+	// and PICOCLAW_TOOLS_EXEC_ENABLED depending on the path taken to it. Deriving the
+	// table here is the same defence as the rest of the dump: a port once dropped
+	// `web` while walking into `brave` because it decided from the root schema, and a
+	// hand-copied env list is that bug with a longer literal.
+	//
+	// What the table decides is what the corpus grades: whether a load refuses at all
+	// (env.Parse aborts the whole load on a mistyped value while the compat shims
+	// ignore one silently -- so strictness is per variable, not global) and what the
+	// loaded value and saved bytes then say. The refusal text is not graded: a failing
+	// case records only `error_op_index`, and Go's message names the Go struct field
+	// rather than a JSON path, so no consumer needs byte parity with it. `go` is
+	// carried for exactly that reason -- it is what the message names.
+	EnvIndex []envBinding `json:"env_index,omitempty"`
+	// ShimVars is set on the root node only: the variables the hand-written compat
+	// shims read. They are listed apart from EnvIndex because a shim can write a
+	// position no tag points at (PICOCLAW_HOME lands in a path built by
+	// filepath.Join, not at a tagged field), and a strict tag and a shim can name the
+	// same variable (then the strict layer runs first, because LoadConfig calls
+	// env.Parse before the shims).
+	ShimVars []envShim `json:"shim_vars,omitempty"`
+	// EnvPasses states, once per pass, what happens to a value the parser cannot use.
+	// It is a sibling of the rows rather than a column because the rule belongs to the
+	// pass, and a row disagreeing with it can only mean this dump is wrong.
+	EnvPasses []envPass `json:"env_passes,omitempty"`
+}
+
+// envPass is one env.Parse call site and its failure policy.
+type envPass struct {
+	// Name matches envBinding.Pass.
+	Name string `json:"name"`
+	// Site is the Go function and file that calls env.Parse, so a row's provenance is
+	// greppable the same way a shim reader is.
+	Site string `json:"site"`
+	// BadValue is what a value the parser rejects does: "refuse_load" aborts the load
+	// and names the Go field; "ignore" leaves the field at whatever the file said.
+	BadValue string `json:"bad_value"`
+	// EntryRequired is true when the binding exists only for an entry of a matching
+	// channel_list key: no entry, no binding.
+	EntryRequired bool `json:"entry_required,omitempty"`
+}
+
+// envBinding is one row of the root's env index: a variable and the document
+// position env.Parse writes for it.
+//
+// It is per (variable, position) rather than per variable, because the library
+// walks fields, not names: one name bound at two positions sets both, and a port
+// that de-duplicated by name would write one. Duplicates are counted in the
+// commit that adds this rather than assumed away.
+type envBinding struct {
+	// Var is the fully resolved name: every ancestor's envPrefix, in the order the
+	// walk meets them, prepended to the tag's own name. This is the string the
+	// operating system carries, so a consumer never composes names.
+	Var string `json:"var"`
+	// Path is the JSON key sequence from the root document to the field, using the
+	// same names the validator refuses unknown keys by. An embedded struct adds no
+	// segment, because encoding/json inlines it.
+	Path []string `json:"path"`
+	// Go is the Go field name: what env.Parse's error message names, and the only
+	// stable identifier for a field whose JSON name is shared with cousins.
+	Go string `json:"go"`
+	// Type is the type the parser targets, which is what makes a value mistyped:
+	// int refuses "abc", bool refuses "yes", string refuses nothing. A named type
+	// reports `Name:underlying` so a consumer that knows FlexibleStringSlice or
+	// SecureStrings can dispatch on the name and still see the shape underneath.
+	Type string `json:"type"`
+	// Indexed marks a position reached through a slice of structs. The library parses
+	// element i under the prefix `<p><i>_` and builds only as many elements as it
+	// finds variables for, so the real name has an index spliced in and is unbounded
+	// at dump time. The path spells the index `0` as the pattern; a consumer matches
+	// the `<prefix><digits>_` shape rather than a literal name.
+	Indexed bool `json:"indexed,omitempty"`
+	// Pass is which of the two env.Parse calls binds this field: "root" for
+	// env.Parse(cfg) in LoadConfig, "channel" for the per-entry env.Parse(target) in
+	// InitChannelList (config_channel.go:750). They disagree on the one thing a port
+	// cannot guess: an unparseable value at a root field aborts the whole load, while
+	// the same at a channel field is swallowed by that pass's own Non-fatal comment.
+	// Measured both ways with the probe at picoclaw 6ab4ab27: a bad int at
+	// agents.defaults.context_window refuses the load naming the field, while a bad
+	// bool at a channel settings field leaves the field at its file value and the load
+	// still succeeds.
+	Pass string `json:"pass"`
+	// Secret is set when the field's type masks its own value: SecureString and
+	// SecureStrings. Measured with the probe at picoclaw 6ab4ab27 -- a document that
+	// carries tools/web/brave/api_keys and tools/web/baidu_search/api_key loads fine,
+	// and neither key is present in the loaded projection or in the saved file; a
+	// variable naming the same field changes neither. So every row flagged here has no
+	// observable through the marshaller -- the count is not written down because it is
+	// a property of the tag set, not of this file: they are emitted because the binding
+	// is real (env.Parse writes the field, and runtime behaviour depends on it) and
+	// flagged because a case that sets one cannot be graded by comparing bytes. Grading them
+	// needs the op kind that reports a field through an accessor, which is the same
+	// piece #34 deferred for the marshal-stage-collapse question.
+	Secret bool `json:"secret,omitempty"`
+	// ParseNote marks the one row whose parse target does not behave like its type.
+	ParseNote string `json:"parse_note,omitempty"`
+	// PrefixNote marks a row whose name is the enclosing envPrefix joined to a tag
+	// that already begins with that same prefix. The duplication is not a generator
+	// artefact: the loader joins prefix and tag unconditionally, so the doubled name
+	// is the one it reads and the shorter one is dead. Do not "correct" the name here.
+	PrefixNote string `json:"prefix_note,omitempty"`
+	// ChannelTypes is set for pass "channel": the channel types whose settings struct
+	// carries this field, from channelSettingsFactory. The position is not a static
+	// path -- it hangs off a channel_list entry whose `type` names one of these -- so
+	// a consumer applies the row per matching entry rather than once per document.
+	// An entry of that type has to exist: the defaults carry one entry for 16 types and
+	// none for mqtt, vk or pico_client, so a variable for those three binds nothing
+	// until the file creates such an entry.
+	ChannelTypes []string `json:"channel_types,omitempty"`
+}
+
+// envShim is one compat-shim variable: the name a shim looks up, the function that
+// looks it up, and whether a strict tag binds the same name.
+//
+// These are the non-strict half of the layer. Measured 2026-11-14 (one process per
+// shape at picoclaw `9dbecf98`): `..._CLAWHUB_ENABLED=yes` left `enabled: true` in
+// place, `..._CLAWHUB_TIMEOUT=abc` added no key at all, and
+// PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS=x changed nothing -- while
+// a bad int at a tagged field aborted the load and left both input files
+// byte-identical. A port that treats every variable as strict refuses files Go
+// loads; one that treats every variable as lenient loads files Go refuses.
+//
+// The reader name is emitted because these are code, not tags: the row's provenance
+// is a call site, and a reviewer checking whether the list is current greps for it.
+type envShim struct {
+	Var    string `json:"var"`
+	Reader string `json:"reader"`
+	Tagged bool   `json:"tagged,omitempty"`
 }
 
 // yamlField is one entry of a struct's yaml emission list.
@@ -219,6 +356,16 @@ type ctx struct {
 	// terminate: a self-referential struct gets a scalar placeholder the second
 	// time, which is what reflect would report as the same shape anyway.
 	cache map[string]*node
+	// files keeps every parsed file so the compat-shim scan can run after the whole
+	// directory is read. It has to: the shims look their names up through constants
+	// (envSkillsClawHubEnabled, EnvGatewayHost) declared in another file, so a call
+	// site met mid-loop would resolve to nothing -- the same reason singletonRefs are
+	// held as expressions and resolved once every constant is known.
+	files []*ast.File
+	// fieldReachable is every struct name the root walk touched. It is what lets the
+	// channel pass refuse a settings struct that is *also* reachable through the
+	// document: two passes binding one field is a claim this dump cannot make.
+	fieldReachable map[string]bool
 	// yamlMarshalers is every type in the directory that declares its own
 	// `MarshalYAML()`. The security writer has to know, because for those types the
 	// emitted node is whatever that method returns -- not the struct's fields -- and
@@ -331,6 +478,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		c.files = append(c.files, f)
 		// Two pieces of loader behaviour live in code rather than in a literal, and both
 		// are things the port has to know exactly:
 		//
@@ -472,6 +620,77 @@ func main() {
 		os.Exit(1)
 	}
 	out := c.structNode(os.Args[2], root, 0)
+	// The env index is built from the root, after the tree exists, because a
+	// variable's name is only complete once every ancestor prefix on the path to it
+	// is known. It deliberately does not live on the nodes a field is reached
+	// through: structNode caches one node per named type and `ToolConfig` is reached
+	// under six prefixes, so a resolved name stored on a cached node would report
+	// whichever path the walk happened to take first. One traversal from the root has
+	// no such state.
+	var bindings []envBinding
+	c.collectEnv(os.Args[2], "", nil, 0, map[string]bool{}, &bindings)
+	sort.SliceStable(bindings, func(i, j int) bool {
+		if bindings[i].Var != bindings[j].Var {
+			return bindings[i].Var < bindings[j].Var
+		}
+		return strings.Join(bindings[i].Path, ".") < strings.Join(bindings[j].Path, ".")
+	})
+	tags := map[string]bool{}
+	for _, b := range bindings {
+		tags[b.Var] = true
+	}
+	// A shim name no strict tag carries is normal (PICOCLAW_HOME, PICOCLAW_LOG_LEVEL);
+	// a strict name a shim also reads is the interesting case, and `tagged` says so.
+	// The channel pass. InitChannelList decodes every channel_list entry into its
+	// per-type settings struct and calls env.Parse on that struct, so those tags bind
+	// too -- just not through the root's type graph, which is why the walk above finds
+	// none of them (Channel.Settings is a RawNode). A port that replays only the root
+	// pass silently drops 79 of the package's 192 bindable env sites.
+	bySettings := map[string][]string{}
+	for chanType, settingsName := range c.settingsTypes {
+		if settingsName == "" {
+			continue
+		}
+		bySettings[settingsName] = append(bySettings[settingsName], chanType)
+	}
+	for _, settingsName := range sortedKeys(bySettings) {
+		types := bySettings[settingsName]
+		sort.Strings(types)
+		if c.fieldReachable[settingsName] {
+			// A struct reached by both passes would bind twice, from the document and
+			// from the entry, and the dump would say one thing while Go did another.
+			fmt.Fprintf(os.Stderr, "%s is reachable from the root AND from a channel entry: refusing to emit two bindings for one field\n", settingsName)
+			os.Exit(1)
+		}
+		var rows []envBinding
+		c.collectEnv(settingsName, "", nil, 0, map[string]bool{}, &rows)
+		for _, row := range rows {
+			row.Pass = "channel"
+			row.ChannelTypes = types
+			bindings = append(bindings, row)
+		}
+	}
+	sort.SliceStable(bindings, func(i, j int) bool {
+		if bindings[i].Var != bindings[j].Var {
+			return bindings[i].Var < bindings[j].Var
+		}
+		if bindings[i].Pass != bindings[j].Pass {
+			return bindings[i].Pass < bindings[j].Pass
+		}
+		return strings.Join(bindings[i].Path, ".") < strings.Join(bindings[j].Path, ".")
+	})
+	for i := range bindings {
+		if bindings[i].Pass == "" {
+			bindings[i].Pass = "root"
+		}
+		tags[bindings[i].Var] = true
+	}
+	out.EnvPasses = []envPass{
+		{Name: "root", Site: "LoadConfig (config.go:1518)", BadValue: "refuse_load"},
+		{Name: "channel", Site: "InitChannelList (config_channel.go:750)", BadValue: "ignore", EntryRequired: true},
+	}
+	out.EnvIndex = bindings
+	out.ShimVars = c.collectShims(tags)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", " ")
 	_ = enc.Encode(out)
@@ -658,6 +877,276 @@ func (c *ctx) nodeFor(expr ast.Expr, depth int) *node {
 	default:
 		return &node{Kind: "scalar", Name: typeString(expr)}
 	}
+}
+
+// collectEnv walks the struct graph the way env.Parse does and appends one row per
+// (variable, position) it would bind.
+//
+// The rules are the library's, read off env.go v11.4.1 rather than remembered, and
+// each is a place a port could quietly differ:
+//
+//   - an unexported field is skipped: doParseField returns on !refField.CanSet().
+//   - `env:"-"` prunes the field *and its subtree*: parseFieldParams sets Ignored and
+//     doParseField returns before the struct recursion. Measured count in the commit.
+//   - envPrefix on a field is prepended to everything below it and binds nothing
+//     itself: optionsWithEnvPrefix is opts.Prefix + the tag.
+//   - a struct field is walked whether or not it carries an `env` tag of its own
+//     (env.go:407), which is why an absolute name inside a nested struct stays
+//     absolute -- only envPrefix composes.
+//   - a slice of structs is walked per element under `<prefix><i>_`, and only when
+//     some variable carries that shape (doParseSlice counts the indices it finds).
+//   - a map is never walked: doParseField has no Map case. That is the mechanism
+//     behind what otherwise reads as a precedence rule --
+//     PICOCLAW_CHANNELS_TELEGRAM_TOKEN changes nothing at all, because channel_list
+//     is a map and a map value is not a field env ever sees.
+func (c *ctx) collectEnv(structName string, prefix string, path []string, depth int, seen map[string]bool, out *[]envBinding) {
+	key := structName + "\x00" + prefix + "\x00" + strings.Join(path, ".")
+	if depth > 12 || seen[key] {
+		return
+	}
+	st, ok := c.structs[structName]
+	if !ok {
+		return
+	}
+	seen[key] = true
+	if c.fieldReachable == nil {
+		c.fieldReachable = map[string]bool{}
+	}
+	c.fieldReachable[structName] = true
+	for _, field := range st.Fields.List {
+		envTag, hasEnv := tagValue(field.Tag, "env")
+		prefixTag, _ := tagValue(field.Tag, "envPrefix")
+		if envTag == "" && hasEnv {
+			// env:"" would look up the empty variable name. None exist today; if one
+			// is ever added, the index must not silently invent a binding for it.
+			fmt.Fprintf(os.Stderr, "env:\"\" on a field of %s -- refusing to guess its name\n", structName)
+			os.Exit(1)
+		}
+		if len(field.Names) == 0 {
+			// embedded: encoding/json inlines it, so the path does not grow, while
+			// reflect sees a promoted struct field whose prefix still applies.
+			if envTag == "-" {
+				continue
+			}
+			if name, ok := c.resolveStructName(field.Type); ok {
+				c.collectEnv(name, prefix+prefixTag, path, depth+1, seen, out)
+			}
+			continue
+		}
+		for _, ident := range field.Names {
+			if !ast.IsExported(ident.Name) {
+				continue
+			}
+			if envTag == "-" {
+				// Pruned, subtree included: the library returns before recursing.
+				continue
+			}
+			jsonName := tagJSONName(field.Tag)
+			if jsonName == "" {
+				jsonName = ident.Name
+			}
+			if hasEnv {
+				leaf := c.envLeafType(field.Type)
+				row := envBinding{
+					Var:  prefix + envTag,
+					Path: append(append([]string{}, path...), jsonName),
+					Go:   ident.Name,
+					Type: leaf,
+				}
+				if strings.Contains(leaf, "SecureString") {
+					row.Secret = true
+				}
+				if prefix != "" && strings.HasPrefix(envTag, prefix) {
+					// Both halves are in the source; the loader composes them anyway.
+					row.PrefixNote = "the env tag repeats the enclosing envPrefix, so the name read is both joined; the shorter name binds nothing"
+				}
+				if strings.HasSuffix(leaf, "RawMessage") {
+					// Measured, not inferred from the library: the value is ParseUint'd
+					// and written as a single raw byte into the raw-JSON field, so the
+					// digits a user sets are not the digits they get. 49 lands as 1; 7
+					// lands as byte 0x07 and the document then fails to marshal with
+					// "invalid character '' looking for beginning of value". A port that
+					// parsed this as JSON would load a file Go cannot save.
+					row.ParseNote = "the parser reads an unsigned integer and writes it as one raw byte, not as JSON"
+				}
+				*out = append(*out, row)
+			}
+			c.descendEnv(field.Type, jsonName, prefix+prefixTag, path, depth, seen, out)
+		}
+	}
+	delete(seen, key)
+}
+
+// resolveStructName names the struct a field's type leads to, following a named
+// alias one step (`type AgentsConfig []AgentConfig` reaches AgentConfig).
+func (c *ctx) resolveStructName(expr ast.Expr) (string, bool) {
+	e, ok := strip(expr).(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	if _, isStruct := c.structs[e.Name]; isStruct {
+		return e.Name, true
+	}
+	if underlying, ok := c.aliases[e.Name]; ok {
+		return c.resolveStructName(underlying)
+	}
+	return "", false
+}
+
+// descendEnv recurses into a named field: structs under the accumulated prefix,
+// slices of structs under the indexed prefix, maps not at all.
+func (c *ctx) descendEnv(expr ast.Expr, jsonName, prefix string, path []string, depth int, seen map[string]bool, out *[]envBinding) {
+	if name, ok := c.resolveStructName(expr); ok {
+		c.collectEnv(name, prefix, append(append([]string{}, path...), jsonName), depth+1, seen, out)
+		return
+	}
+	arr, ok := strip(expr).(*ast.ArrayType)
+	if !ok {
+		if underlying, isAlias := c.aliases[identName(expr)]; isAlias {
+			c.descendEnv(underlying, jsonName, prefix, path, depth+1, seen, out)
+		}
+		return
+	}
+	elem, ok := strip(arr.Elt).(*ast.Ident)
+	if !ok {
+		return
+	}
+	if _, isStruct := c.structs[elem.Name]; !isStruct {
+		return
+	}
+	// doParseSlice: element i is parsed under `<prefix><i>_`, and only if some
+	// variable carries that shape. The rows are marked so a consumer splices the
+	// index instead of treating the pattern name as a literal.
+	before := len(*out)
+	c.collectEnv(elem.Name, prefix, append(append([]string{}, path...), jsonName, "0"), depth+1, seen, out)
+	for i := before; i < len(*out); i++ {
+		(*out)[i].Indexed = true
+	}
+}
+
+// identName is the alias key for a type expression, or "" when it is not a plain
+// named type -- a map or an anonymous struct has no env-relevant alias to follow.
+func identName(expr ast.Expr) string {
+	if e, ok := strip(expr).(*ast.Ident); ok {
+		return e.Name
+	}
+	return ""
+}
+
+// envLeafType names the type the parser targets, because that is what decides
+// whether a value is mistyped. A named type reports `Name:underlying`.
+func (c *ctx) envLeafType(expr ast.Expr) string {
+	switch e := strip(expr).(type) {
+	case *ast.Ident:
+		if underlying, ok := c.aliases[e.Name]; ok {
+			if inner := c.envLeafType(underlying); inner != "" {
+				return e.Name + ":" + inner
+			}
+		}
+		return e.Name
+	case *ast.ArrayType:
+		return "[]" + typeString(e.Elt)
+	default:
+		return typeString(expr)
+	}
+}
+
+// collectShims finds every os.LookupEnv / os.Getenv call in the package and names
+// what it reads. This is the compat-shim inventory: unlike the tags there is
+// nothing to walk, so the call sites are the list, and each row carries the
+// enclosing function as its provenance.
+//
+// An argument that is neither a string literal nor a resolvable constant is an
+// error rather than a skip: a missing row tells a port that a variable is strict
+// when it is lenient, and that is the silent direction of failure.
+func (c *ctx) collectShims(tagged map[string]bool) []envShim {
+	type ref struct {
+		expr ast.Expr
+		fn   string
+	}
+	var refs []ref
+	for _, f := range c.files {
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			fn := fd.Name.Name
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || len(call.Args) != 1 {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok || pkg.Name != "os" {
+					return true
+				}
+				if sel.Sel.Name != "LookupEnv" && sel.Sel.Name != "Getenv" {
+					return true
+				}
+				refs = append(refs, ref{call.Args[0], fn})
+				return true
+			})
+		}
+	}
+	byVar := map[string]envShim{}
+	for _, r := range refs {
+		name := constName(r.expr, c.consts)
+		if name == "" {
+			if lit, ok := r.expr.(*ast.BasicLit); ok {
+				name, _ = strconv.Unquote(lit.Value)
+			}
+		}
+		if name == "" {
+			fmt.Fprintf(os.Stderr, "%s: cannot resolve the environment name %s\n", r.fn, typeString(r.expr))
+			os.Exit(1)
+		}
+		row := byVar[name]
+		if row.Var == "" {
+			row = envShim{Var: name, Reader: r.fn, Tagged: tagged[name]}
+		} else if !row.Tagged {
+			row.Tagged = tagged[name]
+		}
+		byVar[name] = row
+	}
+	var out []envShim
+	for _, row := range byVar {
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Var < out[j].Var })
+	return out
+}
+
+// sortedKeys makes the channel pass deterministic: it iterates a map of channel
+// types, and the dump is embedded and compared byte for byte.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// tagValue reads one named struct tag out of a field's tag literal, which is a raw
+// literal everywhere in this package but is unquoted properly in case that changes.
+func tagValue(tag *ast.BasicLit, key string) (string, bool) {
+	if tag == nil {
+		return "", false
+	}
+	text := strings.Trim(tag.Value, "`")
+	if text == tag.Value {
+		// a double-quoted tag literal rather than a raw one
+		if u, err := strconv.Unquote(tag.Value); err == nil {
+			text = u
+		}
+	}
+	v, ok := reflect.StructTag(text).Lookup(key)
+	return v, ok
 }
 
 func strip(expr ast.Expr) ast.Expr {
